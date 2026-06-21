@@ -1,0 +1,29 @@
+#!/bin/bash
+# Pre-commit hook: Format and lint staged files via lint-staged.
+# Skips gracefully when lint-staged is not installed (non-Node projects).
+
+set -euo pipefail
+
+git_root=$(git rev-parse --show-toplevel)
+
+# Reject unresolved merge conflict markers (and whitespace errors) in staged
+# content. A hook file left with <<<<<<< markers is a bash syntax error that
+# can block every Claude tool call until it's manually repaired.
+if ! git diff --cached --check; then
+  echo "pre-commit: refusing commit — fix the issues above" >&2
+  exit 1
+fi
+
+if [ -d "$git_root/.venv/bin" ]; then
+  export PATH="$git_root/.venv/bin:$PATH"
+fi
+
+if [ ! -f "$git_root/node_modules/.bin/lint-staged" ]; then
+  exit 0
+fi
+
+if command -v pnpm >/dev/null 2>&1; then
+  pnpm exec lint-staged --allow-empty
+elif command -v npm >/dev/null 2>&1; then
+  npx lint-staged --allow-empty
+fi
