@@ -22,7 +22,19 @@ const INVISIBLE_VALUES = [
   cp(0x2800),
   `${cp(0x1b)}[31m`,
   `${cp(0x1b)}[0m`,
+  // 8-bit C1 forms of the same hazards: a complete CSI sequence and a bare
+  // introducer. Seeded explicitly because a uniform 0..0x10FFFF draw lands on
+  // U+009B only ~1-in-a-million, so the fuzzer never reaches it on its own.
+  `${cp(0x9b)}31m`,
+  cp(0x9b),
 ];
+
+// Every raw ANSI control introducer Layer 1 must guarantee is gone from the
+// output. The no-silent-suppression invariant alone can't catch a passthrough
+// (an unchanged byte trivially satisfies it), so this is the postcondition that
+// turns "output is clean" into a checked property rather than a hope.
+// eslint-disable-next-line no-control-regex -- asserting the raw introducers are absent is the point
+const RAW_INTRODUCER_RE = /[\u001b\u009b]/;
 const STRUCTURAL_TOKENS = [
   '<div style="display:none">',
   "</div>",
@@ -71,6 +83,10 @@ describe("fuzz: crash resistance and no silent suppression", () => {
       fc.asyncProperty(adversarialInput, async (input) => {
         const result = await sanitize(input, { html: true });
         assert.equal(typeof result.cleaned, "string");
+        // Postcondition: no raw control introducer (7-bit ESC / 8-bit C1 CSI)
+        // survives Layer 1 — the under-stripping invariant the no-silent-
+        // suppression check below is structurally blind to.
+        assert.doesNotMatch(result.cleaned, RAW_INTRODUCER_RE);
         // Any change must be accompanied by a warning — content can never
         // vanish silently.
         if (result.cleaned !== input) assert.ok(result.warnings.length > 0);
