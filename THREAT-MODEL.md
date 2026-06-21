@@ -33,7 +33,8 @@ The three layers are independent; use only the ones your ingress needs.
 **Reassembly hardening.** Stripping an invisible char can reconstitute an ANSI
 escape its split had hidden, and removing one ANSI sequence can reconstitute
 another. Layer 1 strips ANSI to a fixed point and then sweeps any residual raw
-ESC byte outright, so the result is ESC-free for _any_ input and the operation is
+control introducer—7-bit ESC (U+001B) or 8-bit C1 CSI (U+009B)—outright, so the
+result carries no raw ANSI introducer for _any_ input and the operation is
 idempotent.
 
 ## Layer 2—hidden HTML (remark/rehype)

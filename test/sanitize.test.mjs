@@ -89,6 +89,9 @@ describe("sanitize: Layer 1 ESC neutralization + idempotency", () => {
     assert.ok(!out.cleaned.includes(cp(0x9b)), "U+009B survived the sweep");
     assert.equal(out.cleaned, "ab");
     assert.match(out.found.join(", "), /ANSI escapes/);
+    // The sweep must honor the no-silent-suppression contract deterministically,
+    // not just probabilistically via the fuzz postcondition.
+    assert.ok(out.warnings.length > 0, "swept a byte without warning");
   });
 });
 
