@@ -26,7 +26,12 @@ export {
   SCATTERED_THRESHOLD,
 } from "./invisible.mjs";
 
-const ESC = "\u001b";
+// The two raw control introducers an ANSI sequence can start with: 7-bit
+// ESC (U+001B) and the 8-bit C1 CSI (U+009B). Both are category Cc, so the
+// invisible-char pass (which targets Cf / variation / blank fillers) never
+// removes them; the residual sweep below is what guarantees neither survives.
+// eslint-disable-next-line no-control-regex -- matching the raw introducers is the point
+const CONTROL_INTRODUCER_RE = /[\u001b\u009b]/g;
 
 // Full ANSI escape grammar (CSI/SGR/OSC-with-BEL), not just SGR: the Layer-1
 // guarantee is that no control introducer survives, and a cursor-move or
@@ -64,7 +69,8 @@ function stripAnsiFully(input) {
 }
 
 /**
- * Layer 1: ANSI + invisible-char strip with a guaranteed ESC-free result.
+ * Layer 1: ANSI + invisible-char strip with a result guaranteed free of every
+ * raw ANSI control introducer (7-bit ESC U+001B and 8-bit C1 CSI U+009B).
  *
  * Removing an invisible character can reconstitute an escape its split hid from
  * the ANSI pass (`ESC`<ZWSP>`[32m` → `ESC[32m`), so strip ANSI again after the
@@ -72,10 +78,10 @@ function stripAnsiFully(input) {
  * reconstitution is impossible otherwise and the re-strip is a wasted pass on
  * the hot clean path. The ANSI strip still cannot match an *incomplete*
  * reconstituted sequence (a lone `ESC[` left when an inner complete sequence is
- * removed from a nested split), so a final sweep removes every residual raw ESC
- * outright — that sweep, not the regex matching, is the guarantee that no
- * control introducer survives. `deAnsi` is the ANSI strip of the original
- * (invisible runs intact), the scope a LONG_RUN payload check needs.
+ * removed from a nested split), so a final sweep removes every residual raw
+ * introducer outright — that sweep, not the regex matching, is the guarantee
+ * that no control introducer survives. `deAnsi` is the ANSI strip of the
+ * original (invisible runs intact), the scope a LONG_RUN payload check needs.
  * @param {string} text
  * @returns {{ cleaned: string, deAnsi: string, found: string[] }}
  */
@@ -93,8 +99,9 @@ function applyLayer1(text) {
     if (reStripped.length !== afterInvis.length) ansiFound = true;
     cleaned = reStripped;
   }
-  if (cleaned.includes(ESC)) {
-    cleaned = cleaned.split(ESC).join("");
+  const swept = cleaned.replace(CONTROL_INTRODUCER_RE, "");
+  if (swept !== cleaned) {
+    cleaned = swept;
     ansiFound = true;
   }
 

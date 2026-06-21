@@ -76,6 +76,20 @@ describe("sanitize: Layer 1 ESC neutralization + idempotency", () => {
     assert.ok(!out.cleaned.includes(ESC));
     assert.match(out.found.join(", "), /ANSI escapes/);
   });
+
+  it("strips a complete 8-bit C1 CSI sequence (U+009B introducer)", async () => {
+    const out = await sanitize(`${cp(0x9b)}32m payload`);
+    assert.ok(!out.cleaned.includes(cp(0x9b)));
+    assert.equal(out.cleaned, " payload");
+    assert.match(out.found.join(", "), /ANSI escapes/);
+  });
+
+  it("sweeps a lone/incomplete C1 CSI introducer (U+009B), reporting it", async () => {
+    const out = await sanitize(`a${cp(0x9b)}b`);
+    assert.ok(!out.cleaned.includes(cp(0x9b)), "U+009B survived the sweep");
+    assert.equal(out.cleaned, "ab");
+    assert.match(out.found.join(", "), /ANSI escapes/);
+  });
 });
 
 // ─── Layer 1: BOM / fillers / variation selectors / long run ─────────────────
