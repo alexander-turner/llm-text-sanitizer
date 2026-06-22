@@ -24,7 +24,9 @@
 set -uo pipefail
 
 target="${1:-}"
-shift || true
+# Drop the target arg only when present; `shift` with no args fails under
+# `set -u`. Branch on $# instead of `shift || true`, which would swallow it.
+[ "$#" -eq 0 ] || shift
 
 if [ -z "$target" ] || [ ! -f "$target" ]; then
   echo "safe-launch: missing target hook: $target" >&2

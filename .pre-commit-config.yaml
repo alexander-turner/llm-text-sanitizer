@@ -44,6 +44,33 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  # ci-truth-serum: catch CI "lies" — pipelines that report success while the
+  # real work failed, required checks that silently never report, and artifacts
+  # pinned to mutable names. No published tag yet, so rev is the main HEAD SHA
+  # (pinned per the "SHA-pin third-party sources" rule). ALL hooks enabled:
+  # Tier 1 (honesty + identity), Tier 2 (opinionated — this repo follows the
+  # decide/reporter + cancel-in-progress conventions they assume), and Extras.
+  - repo: https://github.com/alexander-turner/ci-truth-serum
+    rev: 0d932b98e1384685ec289b8f7bb2df760ebfb8af # main (no tagged release yet)
+    hooks:
+      # Tier 1 · Honesty
+      - id: check-workflow-pipefail
+      - id: check-exit-suppression
+      - id: check-stderr-suppression
+      - id: check-pr-paths
+      # Tier 1 · Identity
+      - id: check-pinned-base-images
+      - id: check-pinned-downloads
+      # Tier 2 · Opinionated
+      - id: check-always-reporter
+      - id: check-inline-run-length
+      - id: check-concurrency
+      - id: check-static-concurrency
+      # Extras
+      - id: check-symlinks
+      - id: check-unnamed-regex-groups
+      - id: check-global-stdio-swap
+
   - repo: local
     hooks:
       - id: zizmor

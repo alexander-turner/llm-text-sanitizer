@@ -33,6 +33,9 @@ webi_install_if_missing() {
   if ! command -v "$cmd" &>/dev/null; then
     local installer
     installer=$(mktemp "${TMPDIR:-/tmp}/webi-${cmd}-XXXXXX.sh")
+    # webi.sh serves a per-request generated installer with no published
+    # checksum/signature; we pin HTTPS and validate the shebang below.
+    # pin-exempt: no stable digest to verify against for a dynamic installer.
     if curl --proto '=https' -fsSL "https://webi.sh/$pkg" -o "$installer" 2>/dev/null; then
       if head -n 1 "$installer" | grep -q '^#!'; then
         sh "$installer" >/dev/null 2>&1 || warn "Failed to install $cmd"
