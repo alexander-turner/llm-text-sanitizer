@@ -10,6 +10,19 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [1.0.1] - 2026-06-22
 
+### Changed
+
+- fix(release): declare repository metadata for npm provenance
+- ci(release): adopt punctilio auto-version flow
+- docs(changelog): add fragment for version-update release rework
+- ci(release): publish release without an explicit tag push
+- Update README to format project title as code
+- Update README by removing install and license sections
+- ci: guard that a package.json bump ships its CHANGELOG section
+- docs(changelog): roll changelog.d fragments into 1.0.1 section
+
+## [1.0.1] - 2026-06-22
+
 ### Added
 
 - `CATEGORY` (the stable `found` codes) and `CATEGORY_LABELS` (code→human-label map) exports, available from both the root and `./invisible` entries.
