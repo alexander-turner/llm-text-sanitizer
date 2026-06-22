@@ -34,7 +34,7 @@ Use the `/pr-creation` skill. For contributions to others’ repos, before writi
 
 ## Changelog
 
-**Every PR adds a `changelog.d/<id>.<category>.md` fragment**—no exceptions for “internal churn” (this overrides the carve-out in `changelog.d/README.md`). Use the PR number as `<id>`; pick the [Keep a Changelog](https://keepachangelog.com/) `<category>` (`added`/`changed`/`deprecated`/`removed`/`fixed`/`security`) that fits, defaulting to `fixed` when nothing else does. **Never** hand-edit `CHANGELOG.md` or bump `package.json`—the `release`-label workflow (`release-prep.yaml`) assembles fragments and bumps the version.
+**Add a `changelog.d/<id>.<category>.md` fragment for every user-facing change** (per `changelog.d/README.md`—internal churn like test refactors or CI plumbing still gets none). Use the PR number as `<id>`; pick the [Keep a Changelog](https://keepachangelog.com/) `<category>` (`added`/`changed`/`deprecated`/`removed`/`fixed`/`security`) that fits, defaulting to `fixed` when nothing else does. **Never** hand-edit `CHANGELOG.md` or bump `package.json`—the `release`-label workflow (`release-prep.yaml`) assembles fragments and bumps the version.
 
 ## Code Style
 
