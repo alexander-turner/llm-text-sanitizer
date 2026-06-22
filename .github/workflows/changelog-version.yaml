@@ -1,0 +1,62 @@
+name: Changelog version guard
+
+# A package.json version bump must ship with its CHANGELOG.md `## [version]`
+# section in the same change. The post-merge tag-release job already enforces
+# this, but only AFTER pushing the immutable vX.Y.Z tag — too late to fix
+# cleanly. This guard moves that failure pre-merge.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "package.json"
+      - "CHANGELOG.md"
+      - ".github/scripts/check-changelog-version.sh"
+      - ".github/scripts/changelog-notes.sh"
+      - ".github/workflows/changelog-version.yaml"
+  # No paths filter on pull_request: this is a Required check, and a
+  # workflow-level path filter would skip the whole workflow (including the
+  # changelog-version-passed reporter) on PRs that don't touch these paths,
+  # stranding the check at "Expected — Waiting". The job below is cheap and
+  # no-ops when the version is unchanged.
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Full history so the script can read the PR base commit's package.json
+          # locally (no networked fetch) and HEAD~1 on push events.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup base environment
+        uses: ./.github/actions/setup-base-env
+
+      - name: Check changelog matches package.json version
+        env:
+          # Empty on push events; the script then diffs against HEAD~1.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: bash .github/scripts/check-changelog-version.sh
+
+  # Stable Required check: runs even when `check` is cancelled/skipped, so a
+  # protected branch never gets stuck on a check that never reports.
+  changelog-version-passed:
+    if: always()
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any required job did not pass
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
