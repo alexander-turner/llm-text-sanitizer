@@ -13,15 +13,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
+# Least privilege at the top: the reporter job needs nothing. Write scopes are
+# granted only to the auto-merge job that actually merges/comments.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: github.event.pull_request.user.login == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Dependabot metadata
         id: metadata
@@ -43,3 +47,17 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Stable reporter: runs even when `auto-merge` is gated out on non-dependabot
+  # PRs (its result is then `skipped`, not a failure), so if this check is ever
+  # marked Required a protected branch never gets stuck on a status that never
+  # reports. Mirrors the *-passed gate every other workflow here uses.
+  dependabot-auto-merge-passed:
+    if: always()
+    needs: [auto-merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any required job did not pass
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

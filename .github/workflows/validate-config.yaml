@@ -8,14 +8,11 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
+  # No paths filter on pull_request: this is a Required check, and a workflow-level
+  # path filter would skip the whole workflow (including the validate-config-passed
+  # reporter) on PRs that don't touch these paths, stranding the check at
+  # "Expected — Waiting".
   pull_request:
-    paths:
-      - ".claude/**"
-      - ".hooks/**"
-      - ".github/workflows/**"
-      - "tests/**"
-      - "pyproject.toml"
-      - "uv.lock"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

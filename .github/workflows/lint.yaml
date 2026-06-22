@@ -12,16 +12,11 @@ on:
       - "**/*.cjs"
       - "package.json"
       - ".github/workflows/lint.yaml"
+  # No paths filter on pull_request: this is a Required check, and a workflow-level
+  # path filter would skip the whole workflow (including the lint-passed reporter)
+  # on PRs that don't touch these paths, stranding the check at "Expected — Waiting".
+  # The job below cheaply no-ops via script-configured.sh when nothing applies.
   pull_request:
-    paths:
-      - "**/*.ts"
-      - "**/*.tsx"
-      - "**/*.js"
-      - "**/*.jsx"
-      - "**/*.mjs"
-      - "**/*.cjs"
-      - "package.json"
-      - ".github/workflows/lint.yaml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
