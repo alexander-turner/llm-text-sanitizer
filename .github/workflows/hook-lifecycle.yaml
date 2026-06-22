@@ -17,18 +17,9 @@ on:
       - ".pre-commit-config.yaml"
       - ".github/scripts/run-hook-lifecycle.sh"
       - ".github/workflows/hook-lifecycle.yaml"
-  pull_request: # not-required-check
-    paths:
-      - ".claude/hooks/**"
-      - ".hooks/**"
-      - "setup.sh"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".pre-commit-config.yaml"
-      - ".github/scripts/run-hook-lifecycle.sh"
-      - ".github/workflows/hook-lifecycle.yaml"
+  # No paths filter on pull_request: a workflow-level filter skips the whole
+  # workflow (so it never reports) on PRs that don't match, stranding the check.
+  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
