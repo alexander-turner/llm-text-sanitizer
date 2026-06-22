@@ -112,6 +112,23 @@ describe("stripInvisible: core classes", () => {
   }
 });
 
+// CATEGORY_LABELS is exported as the complete code→label map consumers use to
+// render `found`. Library code only ever reads four of its entries, so without
+// this guard a dropped or empty label for the other categories would ship
+// silently. Drive off the CATEGORY SSOT and assert the key sets match exactly.
+describe("CATEGORY_LABELS completeness", () => {
+  const codes = Object.values(CATEGORY);
+  for (const code of codes) {
+    it(`maps "${code}" to a non-empty human label`, () => {
+      assert.equal(typeof CATEGORY_LABELS[code], "string");
+      assert.ok(CATEGORY_LABELS[code].length > 0);
+    });
+  }
+  it("has no label without a matching CATEGORY code", () => {
+    assert.deepEqual(Object.keys(CATEGORY_LABELS).sort(), [...codes].sort());
+  });
+});
+
 // ─── ZWNJ/ZWJ linguistic carve-out ───────────────────────────────────────────
 // "می‌خ" — ZWNJ between Arabic letters (Persian).
 const PERSIAN = cp(0x645) + cp(0x6cc) + ZWNJ + cp(0x62e);
