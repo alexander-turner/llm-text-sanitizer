@@ -1,53 +1,23 @@
 # llm-text-sanitizer
 
-Defend an LLM against hidden-content injection. This library sanitizes untrusted
-text **before any model sees it**—in an agent, RAG, or tool-use pipeline. It
-has nothing to do with any particular model or provider: it cleans bytes.
+Sanitize untrusted text **before any model sees it**—in an agent, RAG, or
+tool-use pipeline. It’s model- and provider-agnostic: it cleans bytes, not
+prompts.
 
-It does three separable things, exposed as three entry points so the heavy
-dependency stays opt-in:
+Three independent layers, each its own entry point so the heavy dependency
+stays opt-in:
 
-1. **Invisible-char + ANSI stripping** (`./invisible`, zero runtime deps).
-2. **Hidden-HTML splicing** (`./html`, pulls in remark/rehype).
-3. **Exfil-URL detection** (`./html`, detection only).
+| Layer | Entry         | Does                                                         | Deps          |
+| ----- | ------------- | ------------------------------------------------------------ | ------------- |
+| 1     | `./invisible` | Strips payload-capable invisible Unicode and ANSI escapes    | none          |
+| 2     | `./html`      | Splices out human-invisible HTML (comments, hidden elements) | remark/rehype |
+| 3     | `./html`      | Detects data-exfil URLs (reports only, never rewrites)       | remark/rehype |
 
-## Threat model
-
-**Hidden Unicode / steganographic injection.** Text copied from the web, a PDF,
-or a tool response can carry code points that render as nothing but still reach
-the model as instructions: general-category `Cf` format characters (zero-width
-spaces/joiners, bidi controls), variation selectors, Hangul/Braille “blank”
-fillers, soft hyphens, interior byte-order marks, and Unicode tag characters
-abused as an ASCII smuggling channel. A run of these can encode an entire
-“ignore previous instructions, run `rm -rf`” payload invisibly. ANSI/SGR escape
-sequences are the terminal analogue—they can repaint or hide text a human
-operator reads while the model sees something else. Layer 1 removes all of it
-while **preserving ZWNJ/ZWJ where they are linguistically required** (Arabic,
-Persian, and Indic scripts; emoji ZWJ sequences), because blanket stripping
-would corrupt legitimate non-English output. Over-stripping beats
-under-stripping: the linguistic carve-out fires only when both neighbors clearly
-belong to the context, and a long or scattered run disables it.
-
-**Hidden-HTML injection.** When the untrusted text is a fetched web page, an
-attacker can place instructions where a human viewing the rendered page can
-never see them: inside `<!-- HTML comments -->`, behind `display:none` /
-`visibility:hidden` / `opacity:0` / off-screen / zero-size / clipped / white-on-
-white inline styles, or under the `hidden` / `aria-hidden` attributes. The model
-reading raw source sees them all. Layer 2 splices out exactly those byte ranges
-and leaves a placeholder, **preserving every other byte verbatim**—no
-re-serialization, so links, code, and tables are never reflowed. Scripting and
-resource tags (`<script>`, `<style>`, `<iframe>`, `<svg>`, …) and `data:` URI
-resources are _reported but never removed_, so page source stays inspectable.
-
-**Exfil URLs.** A page can try to make the model leak data by getting it to emit
-or follow a URL shaped to carry a payload off-origin: a credential or blob in a
-query/fragment parameter or path segment, an oversized or active-content `data:`
-URI, embedded `user:password@host` credentials, an off-origin form action or
-`meta refresh` redirect, or a `javascript:` target. Layer 3 **detects and
-reports** these (with a reason and the destination host) without modifying the
-text—enforcement stays with your egress controls; this layer is the warning.
-
-See [THREAT-MODEL.md](./THREAT-MODEL.md) for the per-vector detail.
+Layer 1 preserves ZWNJ/ZWJ where an orthography requires them (Arabic, Indic
+scripts, emoji), so it won’t corrupt legitimate non-English text. Layer 2
+preserves every byte outside a hidden range verbatim—no re-serialization, so
+links, code, and tables are never reflowed. See
+[THREAT-MODEL.md](./THREAT-MODEL.md) for the per-vector detail.
 
 ## Install
 
@@ -59,111 +29,63 @@ Node ≥ 20. ESM only.
 
 ## Usage
 
-### 1. The convenience function
-
 ```js
 import { sanitize } from "llm-text-sanitizer";
 
-// Layer 1 only (invisible chars + ANSI), always synchronous work, no heavy deps:
+// Layer 1 only (invisible chars + ANSI) — no heavy deps:
 const { cleaned, found, warnings } = await sanitize(untrustedText);
 
-// Opt into the HTML layers (Layers 2 & 3) for web/HTML ingress:
+// Opt into the HTML layers (2 & 3) for web/HTML ingress:
 const result = await sanitize(fetchedPageSource, { html: true });
-//   result.cleaned   — hidden HTML spliced out, placeholders left in place
-//   result.found     — categories neutralized (e.g. ["Format chars (Cf)", "hidden HTML"])
+//   result.cleaned   — hidden HTML spliced out, placeholders left behind
+//   result.found     — categories neutralized, e.g. ["Format chars (Cf)", "hidden HTML"]
 //   result.warnings  — human-facing notices (long-run alerts, exfil reasons, …)
 ```
 
-`sanitize` never throws and never silently drops content: any change to the text
-is accompanied by at least one entry in `warnings`.
+`sanitize` never throws and never silently drops content: any change to the
+text comes with at least one `warnings` entry.
 
-### 2. Just the zero-dependency invisible-char core
-
-```js
-import {
-  stripInvisible,
-  stripInvisibleWithReport,
-} from "llm-text-sanitizer/invisible";
-
-stripInvisible(text); // -> cleaned string
-const { cleaned, found } = stripInvisibleWithReport(text);
-//   found names exactly the categories removed, e.g. ["Variation selectors"]
-```
-
-This entry pulls in **no runtime dependencies**.
-
-### 3. Just the HTML layer
+Need just one layer? Import it directly:
 
 ```js
-import {
-  sanitizeHtml,
-  detectExfil,
-  checkExfilUrl,
-} from "llm-text-sanitizer/html";
-
-const layer2 = sanitizeHtml(pageSource); // null when nothing to strip/report
-const threats = detectExfil(pageSource); // null or [{ isImage, reason, target }]
-const reason = checkExfilUrl(oneUrl); // null or a string reason
+import { stripInvisible } from "llm-text-sanitizer/invisible"; // zero deps
+import { sanitizeHtml, detectExfil } from "llm-text-sanitizer/html";
 ```
 
-> **The HTML entry is heavier—import it only when you need it.** It pulls in
-> the unified/remark/rehype graph (~200 ms of module-load time). The convenience
-> `sanitize` lazy-loads it only on the `{ html: true }` path, so a Layer-1-only
-> caller never pays for it. If you import from `llm-text-sanitizer/html`
-> directly, you take that cost at import time.
-
-## Public surface
-
-`llm-text-sanitizer` (main)—`sanitize`, plus everything re-exported from
-`./invisible`.
-
-`llm-text-sanitizer/invisible` — `stripInvisible`, `stripInvisibleWithReport`,
-`isSgrOnly`, and the constants `STRIP`, `SGR_RE`, `CHECKS`, `VS`,
-`BLANK_NON_CF`, `LONG_RUN_RE`, `LONG_RUN_THRESHOLD`, `SCATTERED_THRESHOLD`,
-`LINGUISTIC_SCRIPTS`.
-
-`llm-text-sanitizer/html` — `sanitizeHtml`, `scanHtmlFragment`,
-`looksLikeHtmlSource`, `spliceRanges`, `isHiddenStyle`, `isHiddenElement`,
-`isHiddenOpen`, `closingTagName`, `detectExfil`, `checkExfilUrl`, `urlHost`, and
-the constants `REPORTED_TAGS`, `COMMENT_PLACEHOLDER`, `HIDDEN_PLACEHOLDER`,
-`DATA_URI_LENGTH_THRESHOLD`.
+The `./html` entry pulls in the unified/remark/rehype graph (~200 ms of
+module-load time); `sanitize` lazy-loads it only on the `{ html: true }` path,
+so a Layer-1-only caller never pays for it. Every export is listed in the
+[source](./src) JSDoc.
 
 ## Development
 
 ```sh
-npm test            # node --test
-npm run coverage    # c8, enforced at 100% lines/branches/functions
-npm run lint        # eslint
-npm run typecheck   # tsc --noEmit (the source is typed via JSDoc)
+npm test         # node --test, 100% coverage enforced by c8
+npm run lint     # eslint
+npm run check    # tsc --noEmit (source is typed via JSDoc)
 ```
 
-The test suite is the selling point: 100% coverage is enforced in CI, and the
-enumerated members (each linguistic script, each invisible category, each
-reported tag) are driven from single-source-of-truth lists so adding a member
-without a test fails. Property and fuzz tests (fast-check) exercise idempotence,
-deletion-only output, never-throwing on lone surrogates / astral input, and the
-`found` ⇔ changed invariant over the real Unicode input domain.
+Coverage is enforced at 100% in CI; the enumerated members (each linguistic
+script, invisible category, reported tag) are driven from single-source-of-truth
+lists, so adding one without a test fails. Property/fuzz tests (fast-check)
+exercise idempotence, deletion-only output, never-throwing on astral input, and
+the `found` ⇔ changed invariant.
 
 ## Prior work
 
-A few tools tackle adjacent problems. [`llm-sanitizer`](https://pypi.org/project/llm-sanitizer/)
-(Python) is the closest: it scans untrusted documents for hidden instructions
-across the same surfaces—zero-width Unicode, hidden HTML, exfil—but it
-_heuristically flags_ suspicious patterns (“ignore previous instructions,”
-roleplay phrases, base64, homoglyphs) and emits risk-scored reports.
-[llmsanitizer.com](https://llmsanitizer.com/) is a hosted proxy focused on the
-outbound prompt: prompt-injection blocking, PII redaction, and jailbreak
-detection. In npm, [`sanitize-html`](https://www.npmjs.com/package/sanitize-html)
-strips comments and scripts but misses CSS-hidden elements and re-serializes
-(reflowing links, code, and tables), and the common invisible-character
+[`llm-sanitizer`](https://pypi.org/project/llm-sanitizer/) (Python) is the
+closest: it scans untrusted documents over the same surfaces but _heuristically
+flags_ suspicious patterns (“ignore previous instructions,” roleplay, base64)
+and emits risk-scored reports. [llmsanitizer.com](https://llmsanitizer.com/) is
+a hosted proxy for the outbound prompt (injection blocking, PII redaction,
+jailbreaks). In npm, [`sanitize-html`](https://www.npmjs.com/package/sanitize-html)
+misses CSS-hidden elements and reflows output, and the common invisible-char
 strippers blanket-delete zero-width joiners, corrupting Indic scripts and emoji.
 
-This library is deliberately narrower and deterministic. It does not guess at
-intent, score risk, or redact PII; it neutralizes exactly the bytes a human
-cannot see—preserving every other byte verbatim, keeping ZWNJ/ZWJ where an
-orthography requires them, and sweeping ANSI escapes none of the above touch.
-Use it as the byte-level cleaning step _before_ any heuristic or model-based
-defense, not as a replacement for them.
+This library is deliberately narrower and deterministic: it doesn’t guess
+intent, score risk, or redact PII—it neutralizes exactly the bytes a human
+cannot see and reports the rest. Use it as the byte-level cleaning step _before_
+a heuristic or model-based defense, not as a replacement for one.
 
 ## License
 
