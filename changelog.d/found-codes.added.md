@@ -1,0 +1,3 @@
+- `CATEGORY` (the stable `found` codes) and `CATEGORY_LABELS` (code→human-label map) exports, available from both the root and `./invisible` entries.
+- `LINGUISTIC_SCRIPTS` is now re-exported from the root entry, matching the documented public surface.
+- `typecheck` and `coverage` npm scripts, so the commands documented in the README resolve.

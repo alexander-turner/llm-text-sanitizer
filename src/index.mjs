@@ -10,7 +10,12 @@
  * subpath entries; import those directly when you want a single layer without
  * the convenience wrapper.
  */
-import { stripInvisibleWithReport, LONG_RUN_RE } from "./invisible.mjs";
+import {
+  stripInvisibleWithReport,
+  LONG_RUN_RE,
+  CATEGORY,
+  CATEGORY_LABELS,
+} from "./invisible.mjs";
 
 export {
   stripInvisible,
@@ -19,6 +24,9 @@ export {
   STRIP,
   SGR_RE,
   CHECKS,
+  CATEGORY,
+  CATEGORY_LABELS,
+  LINGUISTIC_SCRIPTS,
   VS,
   BLANK_NON_CF,
   LONG_RUN_RE,
@@ -118,7 +126,7 @@ function applyLayer1(text) {
     ansiFound = true;
   }
 
-  if (ansiFound) found.push("ANSI escapes");
+  if (ansiFound) found.push(CATEGORY.ANSI);
   return { cleaned, deAnsi, found };
 }
 
@@ -167,7 +175,7 @@ export async function sanitize(text, { html = false } = {}) {
   let cleaned = layer1;
   if (invisFound.length > 0) {
     found.push(...invisFound);
-    let msg = `Stripped: ${invisFound.join(", ")}`;
+    let msg = `Stripped: ${invisFound.map((code) => CATEGORY_LABELS[code]).join(", ")}`;
     LONG_RUN_RE.lastIndex = 0;
     if (LONG_RUN_RE.test(deAnsi))
       msg += " [LONG RUN — possible injection payload]";
@@ -177,7 +185,7 @@ export async function sanitize(text, { html = false } = {}) {
   const wellFormed = cleaned.replace(LONE_SURROGATE_RE, "\uFFFD");
   if (wellFormed !== cleaned) {
     cleaned = wellFormed;
-    found.push("Lone UTF-16 surrogates");
+    found.push(CATEGORY.LONE_SURROGATES);
     warnings.push("Normalized lone UTF-16 surrogates");
   }
 
@@ -193,8 +201,8 @@ export async function sanitize(text, { html = false } = {}) {
   if (layer2) {
     if (layer2.text !== cleaned) {
       cleaned = layer2.text;
-      if (layer2.removed.comments > 0) found.push("HTML comments");
-      if (layer2.removed.hidden > 0) found.push("hidden HTML");
+      if (layer2.removed.comments > 0) found.push(CATEGORY.HTML_COMMENTS);
+      if (layer2.removed.hidden > 0) found.push(CATEGORY.HIDDEN_HTML);
       warnings.push(
         `HTML sanitized: ${describeRemoved(layer2.removed)} replaced with placeholders`,
       );
@@ -205,7 +213,7 @@ export async function sanitize(text, { html = false } = {}) {
 
   const threats = detectExfil(preSplice);
   if (threats) {
-    found.push("exfil URLs");
+    found.push(CATEGORY.EXFIL_URLS);
     const reasons = [
       ...new Set(
         threats.map(

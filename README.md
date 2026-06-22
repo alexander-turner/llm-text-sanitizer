@@ -41,9 +41,10 @@ const { cleaned, found, warnings } = await sanitize(untrustedText);
 // Opt into the HTML layers for web/HTML ingress:
 const result = await sanitize(fetchedPageSource, { html: true });
 //   result.cleaned   — hidden HTML spliced out, placeholders left in place
-//   result.found     — categories neutralized, e.g. ["Format chars (Cf)", "hidden HTML"]
+//   result.found     — stable category codes neutralized (e.g. ["cf-format", "hidden-html"])
 //   result.warnings  — human-facing notices (long-run alerts, exfil reasons, …)
 ```
+
 
 `sanitize` never throws and never silently drops content: any change to the
 text comes with at least one `warnings` entry. The `{ html: true }` path
@@ -58,7 +59,8 @@ import {
 } from "agent-input-sanitizer/invisible";
 
 stripInvisible(text); // -> cleaned string
-const { cleaned, found } = stripInvisibleWithReport(text); // found = categories removed
+const { cleaned, found } = stripInvisibleWithReport(text);
+//   found names exactly the category codes removed, e.g. ["variation-selectors"]
 ```
 
 ### HTML layer

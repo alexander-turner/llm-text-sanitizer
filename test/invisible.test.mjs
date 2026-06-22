@@ -15,6 +15,8 @@ import {
   STRIP,
   SGR_RE,
   CHECKS,
+  CATEGORY,
+  CATEGORY_LABELS,
   VS,
   BLANK_NON_CF,
   LONG_RUN_RE,
@@ -67,7 +69,7 @@ describe("stripInvisible: core classes", () => {
     it(`strips blank-rendering filler U+${hex} (non-Cf)`, () => {
       const { cleaned, found } = stripInvisibleWithReport(`a${ch}b`);
       assert.equal(cleaned, "ab");
-      assert.deepEqual(found, ["Blank-rendering fillers"]);
+      assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
     });
   }
 
@@ -79,7 +81,7 @@ describe("stripInvisible: core classes", () => {
     it(`strips variation selector U+${hex}`, () => {
       const { cleaned, found } = stripInvisibleWithReport(`a${cp(codePoint)}b`);
       assert.equal(cleaned, "ab");
-      assert.deepEqual(found, ["Variation selectors"]);
+      assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
     });
   }
 
@@ -90,22 +92,41 @@ describe("stripInvisible: core classes", () => {
     assert.deepEqual(found, []);
   });
 
-  // One case per CHECKS category: the label reported must name exactly that
-  // category. Drives from the SSOT so a renamed/dropped category fails here.
+  // One case per CHECKS category: the code reported must name exactly that
+  // category, and every code must carry a human label. Drives from the SSOT so
+  // a renamed/dropped category fails here.
   const categorySample = {
-    "Format chars (Cf)": cp(0x200b), // ZWSP
-    "Variation selectors": cp(0xfe0f),
-    "Blank-rendering fillers": cp(0x3164),
+    [CATEGORY.CF]: cp(0x200b), // ZWSP
+    [CATEGORY.VARIATION_SELECTORS]: cp(0xfe0f),
+    [CATEGORY.BLANK_FILLERS]: cp(0x3164),
   };
-  for (const [label] of CHECKS) {
-    it(`reports the "${label}" category by its label`, () => {
-      const sample = categorySample[label];
-      assert.ok(sample, `no sample wired for CHECKS category "${label}"`);
+  for (const [code] of CHECKS) {
+    it(`reports the "${code}" category by its code`, () => {
+      const sample = categorySample[code];
+      assert.ok(sample, `no sample wired for CHECKS category "${code}"`);
+      assert.ok(CATEGORY_LABELS[code], `no human label for category "${code}"`);
       const { cleaned, found } = stripInvisibleWithReport(`x${sample}y`);
       assert.equal(cleaned, "xy");
-      assert.deepEqual(found, [label]);
+      assert.deepEqual(found, [code]);
     });
   }
+});
+
+// CATEGORY_LABELS is exported as the complete code→label map consumers use to
+// render `found`. Library code only ever reads four of its entries, so without
+// this guard a dropped or empty label for the other categories would ship
+// silently. Drive off the CATEGORY SSOT and assert the key sets match exactly.
+describe("CATEGORY_LABELS completeness", () => {
+  const codes = Object.values(CATEGORY);
+  for (const code of codes) {
+    it(`maps "${code}" to a non-empty human label`, () => {
+      assert.equal(typeof CATEGORY_LABELS[code], "string");
+      assert.ok(CATEGORY_LABELS[code].length > 0);
+    });
+  }
+  it("has no label without a matching CATEGORY code", () => {
+    assert.deepEqual(Object.keys(CATEGORY_LABELS).sort(), [...codes].sort());
+  });
 });
 
 // ─── ZWNJ/ZWJ linguistic carve-out ───────────────────────────────────────────
@@ -224,7 +245,7 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     it(`strips ${name} and reports it`, () => {
       const { cleaned, found } = stripInvisibleWithReport(input);
       assert.equal(cleaned, expected);
-      assert.deepEqual(found, ["Format chars (Cf)"]);
+      assert.deepEqual(found, [CATEGORY.CF]);
     });
   }
 
@@ -243,7 +264,7 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     const input = (cp(0x645) + ZWNJ).repeat(SCATTERED_THRESHOLD) + cp(0x62e);
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, cp(0x645).repeat(SCATTERED_THRESHOLD) + cp(0x62e));
-    assert.deepEqual(found, ["Format chars (Cf)"]);
+    assert.deepEqual(found, [CATEGORY.CF]);
   });
 
   it("counts EVERY invisible class toward the floor, not just joiners", () => {
@@ -253,7 +274,7 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
       cp(0xfe0f).repeat(SCATTERED_THRESHOLD - 1) + cp(0x645) + ZWNJ + cp(0x62e);
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, cp(0x645) + cp(0x62e));
-    assert.deepEqual(found, ["Format chars (Cf)", "Variation selectors"]);
+    assert.deepEqual(found, [CATEGORY.CF, CATEGORY.VARIATION_SELECTORS]);
   });
 
   it("keeps a legit joiner while stripping every other invisible class", () => {
@@ -268,9 +289,9 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, PERSIAN + "abcd");
     assert.deepEqual(found, [
-      "Format chars (Cf)",
-      "Variation selectors",
-      "Blank-rendering fillers",
+      CATEGORY.CF,
+      CATEGORY.VARIATION_SELECTORS,
+      CATEGORY.BLANK_FILLERS,
     ]);
   });
 });
@@ -394,9 +415,9 @@ describe("property: stripInvisible invariants", () => {
     fc.assert(
       fc.property(adversarialText, (text) => {
         const { cleaned, found } = stripInvisibleWithReport(text);
-        // Every reported category must really be a CHECKS label.
-        const labels = new Set(CHECKS.map(([label]) => label));
-        for (const f of found) assert.ok(labels.has(f), `bogus label: ${f}`);
+        // Every reported category must really be a CHECKS code.
+        const codes = new Set(CHECKS.map(([code]) => code));
+        for (const f of found) assert.ok(codes.has(f), `bogus code: ${f}`);
         // found non-empty ⇔ the text changed (a strip happened). A preserved
         // joiner leaves text === cleaned AND found empty.
         assert.equal(found.length > 0, cleaned !== text);

@@ -7,7 +7,9 @@
   "scripts": {
     "postinstall": "git config core.hooksPath .hooks",
     "test": "c8 node --test",
+    "coverage": "c8 node --test",
     "check": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "build:types": "tsc -p tsconfig.build.json",
     "prepack": "pnpm build:types",
     "lint": "eslint .",
