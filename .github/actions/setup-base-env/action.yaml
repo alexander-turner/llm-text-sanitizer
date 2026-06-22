@@ -5,6 +5,10 @@ inputs:
     description: "Node.js version to use"
     required: false
     default: "22"
+  registry-url:
+    description: "npm registry URL (sets up .npmrc auth for publishing); empty skips it"
+    required: false
+    default: ""
   setup-python:
     description: "Whether to set up Python with uv"
     required: false
@@ -22,6 +26,7 @@ runs:
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
       with:
         node-version: ${{ inputs.node-version }}
+        registry-url: ${{ inputs.registry-url }}
 
     - name: Install pnpm
       if: hashFiles('package.json') != ''

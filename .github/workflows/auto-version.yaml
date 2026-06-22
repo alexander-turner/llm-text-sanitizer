@@ -1,0 +1,45 @@
+name: Auto Version Bump and Publish
+
+# Post-merge release. On every push to main, version-bump.sh decides the semver
+# bump from Conventional Commits since the last tag, has Claude draft the
+# CHANGELOG prose (optional), publishes to npm with provenance via OIDC trusted
+# publishing, promotes the `## Unreleased` block to a dated section, commits the
+# release docs back to main (`[skip ci]`), and tags vX.Y.Z. npm + git tags are
+# the source of truth for the version; package.json is not committed.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: version-and-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  version-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # Credentials stay persisted: version-bump.sh pushes the release-docs
+        # commit to main and the tag with them. A PAT clears branch/tag
+        # protection; falls back to GITHUB_TOKEN.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3 # zizmor: ignore[artipacked]
+        with:
+          # Full history so the script can find the last tag and the commit range.
+          fetch-depth: 0
+          token: ${{ secrets.TEMPLATE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Setup
+        uses: ./.github/actions/setup-base-env
+        with:
+          registry-url: https://registry.npmjs.org
+
+      - name: Auto Version Bump and Publish
+        run: bash scripts/version-bump.sh
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

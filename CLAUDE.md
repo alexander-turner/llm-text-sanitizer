@@ -34,7 +34,7 @@ Use the `/pr-creation` skill. For contributions to others’ repos, before writi
 
 ## Changelog
 
-**Add a `changelog.d/<id>.<category>.md` fragment for every user-facing change** (per `changelog.d/README.md`—internal churn like test refactors or CI plumbing still gets none). Use the PR number as `<id>`; pick the [Keep a Changelog](https://keepachangelog.com/) `<category>` (`added`/`changed`/`deprecated`/`removed`/`fixed`/`security`) that fits, defaulting to `fixed` when nothing else does. **Never** hand-edit `CHANGELOG.md` or bump `package.json`—the `release`-label workflow (`release-prep.yaml`) assembles fragments and bumps the version.
+**Record every user-facing change under the `## Unreleased` heading in `CHANGELOG.md`**, using the [Keep a Changelog](https://keepachangelog.com/) headings (`### Added`/`### Changed`/`### Deprecated`/`### Removed`/`### Fixed`/`### Security`) that fit—internal churn like test refactors or CI plumbing still gets none. On push to `main`, the post-merge `auto-version` workflow (`auto-version.yaml` → `scripts/version-bump.sh`) decides the semver bump from Conventional Commit subjects since the last tag, has Claude polish the Unreleased prose (optional), publishes to npm with provenance, promotes `## Unreleased` to a dated `## [version]` section, and tags `vX.Y.Z`. **Never** add a dated section by hand or bump `package.json`’s version—npm and git tags are the source of truth and the workflow does the promotion.
 
 ## Code Style
 

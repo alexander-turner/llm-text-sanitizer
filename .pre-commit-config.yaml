@@ -94,10 +94,3 @@ repos:
         entry: bash .hooks/lint-skills.sh
         language: system
         files: ^\.claude/skills/.*\.md$
-
-      - id: changelog-fragments
-        name: validate changelog.d fragments
-        entry: node scripts/assemble-changelog.mjs --check
-        language: system
-        pass_filenames: false
-        files: ^changelog\.d/
