@@ -1,4 +1,4 @@
-# agent-input-sanitizer
+# `agent-input-sanitizer`
 
 Sanitize untrusted text **before any model sees it**—in an agent, RAG, or
 tool-use pipeline. Provider-agnostic: it cleans bytes, not prompts.
