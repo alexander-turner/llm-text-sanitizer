@@ -43,6 +43,12 @@ determine_bump() {
   fi
 }
 
+# Echo the larger of two dotted "X.Y.Z" versions per `sort -V`. An empty input
+# sorts as the smallest possible version, so max_version("","1.2.3") == "1.2.3".
+max_version() {
+  printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1
+}
+
 # Get the latest published version from npm (source of truth)
 PACKAGE_NAME=$(node -p "require('./package.json').name")
 CURRENT_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
@@ -50,6 +56,18 @@ log "Current npm version: $CURRENT_VERSION"
 
 # Find the latest version tag to determine which commits to analyze
 LAST_TAG=$(git describe --tags --match "v*" --abbrev=0 HEAD 2>/dev/null || echo "")
+
+# The version base must exceed every existing release marker, not just npm. npm
+# and git tags are both declared sources of truth, and a flow migration or a
+# publish that failed after tagging can leave them disagreeing (e.g. a tag
+# pushed without a matching npm publish). Bump from the max of npm and LAST_TAG
+# so the computed version never goes backward and never collides with the tag of
+# HEAD's lineage. Using LAST_TAG (the same reachable tag the commit range is cut
+# from) keeps the version base aligned with the commits being analyzed.
+BASE_VERSION=$(max_version "$CURRENT_VERSION" "${LAST_TAG#v}")
+if [ "$BASE_VERSION" != "$CURRENT_VERSION" ]; then
+  log "Latest tag ($LAST_TAG) is ahead of npm ($CURRENT_VERSION); bumping from $BASE_VERSION."
+fi
 
 if [ -n "$LAST_TAG" ]; then
   # Skip if HEAD is already tagged (no new commits since last release)
@@ -186,8 +204,8 @@ Use the changelog_draft tool to report the result."
   fi
 fi
 
-# Parse version components
-IFS='.' read -r MAJOR MINOR PATCH_NUM <<<"$CURRENT_VERSION"
+# Parse version components from the base (max of npm and the highest tag)
+IFS='.' read -r MAJOR MINOR PATCH_NUM <<<"$BASE_VERSION"
 
 # Calculate new version
 case $BUMP in
@@ -282,5 +300,12 @@ fi
 
 # Tag the release for future commit range detection. Tag HEAD (which now
 # includes the release-docs commit, if any) so a re-trigger sees HEAD == tag SHA.
-git tag "v$NEW_VERSION"
-git push origin "v$NEW_VERSION" || log "Failed to push tag v$NEW_VERSION. Next run may re-analyze these commits."
+# Guard against an existing tag: BASE_VERSION already keeps NEW_VERSION ahead of
+# every tag, but a re-run of the same release must stay idempotent rather than
+# abort under `set -e`.
+if git rev-parse -q --verify "refs/tags/v$NEW_VERSION" >/dev/null; then
+  log "Tag v$NEW_VERSION already exists; leaving it untouched."
+else
+  git tag "v$NEW_VERSION"
+  git push origin "v$NEW_VERSION" || log "Failed to push tag v$NEW_VERSION. Next run may re-analyze these commits."
+fi
