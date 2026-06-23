@@ -1,0 +1,383 @@
+/**
+ * Unit/example tests for the confusable-folding core. The confusable scanner is
+ * INJECTED as a deterministic fake `scan` returning the documented findings
+ * shape ({ index, char, latinEquivalent }), so these tests pin the folding,
+ * offset-handling, reporting-cap, dedup, fast-path, and field-map behavior
+ * independently of any heavy real engine.
+ */
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  DEFAULT_FIELDS,
+  hasNonAscii,
+  normalizeContext,
+  foldConfusables,
+  normalizeConfusables,
+} from "../src/confusables.mjs";
+import { cp } from "./test-helpers.mjs";
+
+const CYR_A = cp(0x0430); // Cyrillic а → ASCII "a"
+const CYR_O = cp(0x043e); // Cyrillic о → ASCII "o"
+
+// Cyrillic → ASCII map for the fake scanner.
+const CYR_TO_ASCII = {
+  [cp(0x0430)]: "a",
+  [cp(0x043e)]: "o",
+  [cp(0x0435)]: "e",
+  [cp(0x0440)]: "p",
+  [cp(0x0441)]: "c",
+  [cp(0x0445)]: "x",
+  [cp(0x0443)]: "y",
+  [cp(0x0456)]: "i",
+  [cp(0x0455)]: "s",
+  [cp(0x0458)]: "j",
+};
+// Astral mathematical-bold confusables (2 UTF-16 units each).
+const ASTRAL_TO_ASCII = {
+  [cp(0x1d400)]: "a",
+  [cp(0x1d401)]: "b",
+};
+const FOLD_MAP = { ...CYR_TO_ASCII, ...ASTRAL_TO_ASCII };
+
+/**
+ * A deterministic confusable scanner: emits one finding per code point that
+ * appears in FOLD_MAP, with its UTF-16 offset, the matched glyph, and its ASCII
+ * canon. Iterates by code point so astral chars report their leading-unit
+ * offset and full 2-unit `char`.
+ */
+function makeScan(map = FOLD_MAP) {
+  return (text) => {
+    const findings = [];
+    let index = 0;
+    for (const ch of text) {
+      if (Object.prototype.hasOwnProperty.call(map, ch))
+        findings.push({ index, char: ch, latinEquivalent: map[ch] });
+      index += ch.length; // 2 for astral, 1 otherwise
+    }
+    return { findings };
+  };
+}
+
+const scan = makeScan();
+
+// ─── hasNonAscii ─────────────────────────────────────────────────────────────
+
+describe("hasNonAscii", () => {
+  for (const [name, value, expected] of [
+    ["false for empty string", "", false],
+    ["false for plain ASCII", "/etc/passwd", false],
+    ["false for ASCII controls (tab/newline)", "a\tb\nc", false],
+    ["true for a Cyrillic letter", `/${CYR_A}`, true],
+    ["true for an astral char (surrogate >= 0xD800)", cp(0x1f389), true],
+    ["true at the boundary U+0080", cp(0x80), true],
+    ["false at the boundary U+007F", cp(0x7f), false],
+  ]) {
+    it(name, () => assert.equal(hasNonAscii(value), expected));
+  }
+});
+
+// ─── normalizeContext ────────────────────────────────────────────────────────
+
+describe("normalizeContext", () => {
+  it("names every normalized field in the context line", () => {
+    assert.match(
+      normalizeContext(["file_path", "command"]),
+      /^Confusable characters normalized in: file_path, command\./,
+    );
+  });
+  it("mentions the on-disk-name caveat", () => {
+    assert.match(normalizeContext(["file_path"]), /fails to resolve/);
+  });
+});
+
+// ─── foldConfusables ─────────────────────────────────────────────────────────
+
+describe("foldConfusables", () => {
+  it("returns the input unchanged when there are no findings", () => {
+    assert.equal(foldConfusables("/etc/passwd", []), "/etc/passwd");
+  });
+
+  it("folds a single isolated confusable (no ASCII anchor)", () => {
+    const text = `/${CYR_A}`;
+    assert.equal(foldConfusables(text, scan(text).findings), "/a");
+  });
+
+  it("folds multiple confusables in one field", () => {
+    const text = `/${CYR_O}${CYR_A}`;
+    assert.equal(foldConfusables(text, scan(text).findings), "/oa");
+  });
+
+  it("splices highest-index-first so length-changing astral folds stay aligned", () => {
+    // Two adjacent astral confusables; a left-to-right fold would shift the
+    // second finding's offset and corrupt the output.
+    const text = `${cp(0x1d400)}${cp(0x1d401)}`;
+    assert.equal(foldConfusables(text, scan(text).findings), "ab");
+  });
+
+  it("does not require findings to be pre-sorted", () => {
+    const text = `${CYR_A}${CYR_O}`; // offsets 0 and 1
+    // Pass findings in reverse order; the internal sort must still produce "ao".
+    const findings = [
+      { index: 1, char: CYR_O, latinEquivalent: "o" },
+      { index: 0, char: CYR_A, latinEquivalent: "a" },
+    ];
+    assert.equal(foldConfusables(text, findings), "ao");
+  });
+});
+
+// ─── normalizeConfusables: folding positive cases ────────────────────────────
+
+describe("normalizeConfusables: folding", () => {
+  for (const [name, tool, input, field, expected] of [
+    [
+      "normalizes Cyrillic in file_path",
+      "Read",
+      { file_path: `/etc/p${CYR_A}sswd` },
+      "file_path",
+      "/etc/passwd",
+    ],
+    [
+      "normalizes an isolated confusable (no ASCII anchor)",
+      "Read",
+      { file_path: `/${CYR_A}` },
+      "file_path",
+      "/a",
+    ],
+    [
+      "normalizes multiple confusables in one field",
+      "Read",
+      { file_path: `/${CYR_O}${CYR_A}` },
+      "file_path",
+      "/oa",
+    ],
+    [
+      "normalizes Cyrillic in Bash command",
+      "Bash",
+      { command: `c${CYR_A}t /tmp/x` },
+      "command",
+      "cat /tmp/x",
+    ],
+    [
+      "normalizes Cyrillic in MultiEdit file_path",
+      "MultiEdit",
+      {
+        file_path: `/etc/p${CYR_A}sswd`,
+        edits: [{ old_string: "a", new_string: "b" }],
+      },
+      "file_path",
+      "/etc/passwd",
+    ],
+  ]) {
+    it(name, () => {
+      const result = normalizeConfusables(tool, input, { scan });
+      assert.equal(result.updatedInput[field], expected);
+      assert.match(
+        normalizeContext(result.normalized),
+        /Confusable.*normalized/,
+      );
+    });
+  }
+
+  // Each handled tool folds its own path/command field — and only that one.
+  for (const [tool, field] of Object.entries(DEFAULT_FIELDS)) {
+    it(`folds the ${field[0]} field of ${tool}`, () => {
+      const key = field[0];
+      const result = normalizeConfusables(
+        tool,
+        { [key]: `/p${CYR_A}th` },
+        { scan },
+      );
+      assert.deepEqual(result, {
+        updatedInput: { [key]: "/path" },
+        normalized: [`${key} (U+0430 → "a")`],
+      });
+    });
+  }
+
+  it("names each fold (code point → ASCII) so a broken legit path is explainable", () => {
+    const result = normalizeConfusables(
+      "Read",
+      { file_path: `/etc/p${CYR_A}sswd` },
+      { scan },
+    );
+    assert.deepEqual(result.normalized, ['file_path (U+0430 → "a")']);
+  });
+
+  it("folds only mapped fields, leaving siblings untouched", () => {
+    const result = normalizeConfusables(
+      "Edit",
+      { file_path: `/${CYR_A}`, old_string: CYR_A },
+      { scan },
+    );
+    assert.deepEqual(result, {
+      updatedInput: { file_path: "/a", old_string: CYR_A },
+      normalized: ['file_path (U+0430 → "a")'],
+    });
+  });
+
+  it("folds length-changing astral confusables in offset order", () => {
+    const result = normalizeConfusables(
+      "Read",
+      { file_path: `${cp(0x1d400)}${cp(0x1d401)}` },
+      { scan },
+    );
+    assert.deepEqual(result, {
+      updatedInput: { file_path: "ab" },
+      normalized: ['file_path (U+1D400 → "a", U+1D401 → "b")'],
+    });
+  });
+
+  it("caps the reported fold list at 8 with a trailing ellipsis on a glyph-stuffed input", () => {
+    // 10 distinct Cyrillic confusables: more than MAX_REPORTED_FOLDS (8).
+    const glyphs = [
+      0x0430, 0x043e, 0x0435, 0x0440, 0x0441, 0x0445, 0x0443, 0x0456, 0x0455,
+      0x0458,
+    ]
+      .map(cp)
+      .join("");
+    const result = normalizeConfusables(
+      "Bash",
+      { command: `echo ${glyphs}` },
+      { scan },
+    );
+    const note = result.normalized[0];
+    assert.match(note, /, …\)$/);
+    // Exactly 8 folds shown before the ellipsis.
+    assert.equal((note.match(/U\+/g) || []).length, 8);
+  });
+
+  it("dedups identical folds in the report (same glyph repeated)", () => {
+    // Three Cyrillic а in a row: one unique fold entry, all three replaced.
+    const result = normalizeConfusables(
+      "Bash",
+      { command: `${CYR_A}${CYR_A}${CYR_A}` },
+      { scan },
+    );
+    assert.deepEqual(result, {
+      updatedInput: { command: "aaa" },
+      normalized: ['command (U+0430 → "a")'],
+    });
+  });
+
+  it("normalizes multiple mapped fields independently when a custom fields map covers more than one", () => {
+    const fields = { Tool: ["a", "b"] };
+    const result = normalizeConfusables(
+      "Tool",
+      { a: `/${CYR_A}`, b: `/${CYR_O}` },
+      { scan, fields },
+    );
+    assert.deepEqual(result, {
+      updatedInput: { a: "/a", b: "/o" },
+      normalized: ['a (U+0430 → "a")', 'b (U+043E → "o")'],
+    });
+  });
+});
+
+// ─── normalizeConfusables: null / no-op cases ────────────────────────────────
+
+describe("normalizeConfusables: null cases", () => {
+  it("ASCII fast-path returns null WITHOUT calling scan", () => {
+    let called = false;
+    const spyScan = (text) => {
+      called = true;
+      return scan(text);
+    };
+    assert.equal(
+      normalizeConfusables("Bash", { command: "ls -la" }, { scan: spyScan }),
+      null,
+    );
+    assert.equal(called, false);
+  });
+
+  it("passes benign non-ASCII (scan flags nothing) and returns null", () => {
+    // An astral emoji reaches the engine (non-ASCII) but is not a confusable.
+    const result = normalizeConfusables(
+      "Bash",
+      { command: `echo ${cp(0x1f389)}` },
+      { scan },
+    );
+    assert.equal(result, null);
+  });
+
+  it("returns null for an unknown tool even with a confusable", () => {
+    assert.equal(
+      normalizeConfusables("WebSearch", { query: `c${CYR_A}t` }, { scan }),
+      null,
+    );
+  });
+
+  for (const [name, toolInput] of [
+    ["null toolInput", null],
+    ["undefined toolInput", undefined],
+  ]) {
+    it(`returns null for ${name}`, () => {
+      assert.equal(normalizeConfusables("Bash", toolInput, { scan }), null);
+    });
+  }
+
+  it("skips a non-string field value (command: null)", () => {
+    assert.equal(
+      normalizeConfusables("Bash", { command: null }, { scan }),
+      null,
+    );
+  });
+
+  it("returns null when the mapped field is absent", () => {
+    assert.equal(
+      normalizeConfusables("Read", { unrelated: CYR_A }, { scan }),
+      null,
+    );
+  });
+
+  it("returns null when the mapped field is all-ASCII", () => {
+    assert.equal(
+      normalizeConfusables("Read", { file_path: "/etc/passwd" }, { scan }),
+      null,
+    );
+  });
+
+  it("skips Write content (only file_path is mapped)", () => {
+    assert.equal(
+      normalizeConfusables(
+        "Write",
+        { file_path: "/tmp/x", content: `text${CYR_A}` },
+        { scan },
+      ),
+      null,
+    );
+  });
+
+  it("skips Edit old/new_string (only file_path is mapped)", () => {
+    assert.equal(
+      normalizeConfusables(
+        "Edit",
+        { file_path: "/tmp/x", old_string: "a", new_string: `${CYR_A}` },
+        { scan },
+      ),
+      null,
+    );
+  });
+
+  it("returns null when a non-ASCII candidate field has no findings", () => {
+    // A field reaches scan (non-ASCII) but the injected scanner flags nothing,
+    // exercising the `findings.length === 0 → continue` then final null path.
+    const emptyScan = () => ({ findings: [] });
+    assert.equal(
+      normalizeConfusables("Read", { file_path: `/café` }, { scan: emptyScan }),
+      null,
+    );
+  });
+
+  it("uses DEFAULT_FIELDS when no fields map is passed", () => {
+    const result = normalizeConfusables(
+      "Read",
+      { file_path: `/${CYR_A}` },
+      { scan },
+    );
+    assert.deepEqual(result, {
+      updatedInput: { file_path: "/a" },
+      normalized: ['file_path (U+0430 → "a")'],
+    });
+  });
+});

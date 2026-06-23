@@ -93,6 +93,34 @@ describe("lazy-load invariant", () => {
     );
   });
 
+  // Every NON-html entry point must stay off the heavy graph too: the tool-output
+  // pipeline (output.mjs) and the Edit-repair rehydrator only `await import()`
+  // the HTML layer lazily, and the input/prompt/instruction modules never touch
+  // it. A static `import … from "./html.mjs"` slipped into any of these would
+  // tax every consumer with the ~200ms remark/rehype load on module evaluation.
+  for (const file of [
+    "output.mjs",
+    "rehydrate.mjs",
+    "confusables.mjs",
+    "prompt.mjs",
+    "instructions.mjs",
+    "view-map.mjs",
+  ]) {
+    it(`importing ${file} does not eagerly load the HTML/remark graph`, () => {
+      const graph = resolvedGraph(srcUrl(file));
+      assert.ok(
+        graph.some((url) => url.endsWith(`/${file}`)),
+        `recorder saw no ${file} — the resolve hook is not working`,
+      );
+      const leaked = graph.filter(LEAKED);
+      assert.deepEqual(
+        leaked,
+        [],
+        `${file} eagerly loaded the heavy HTML graph: ${leaked.join(", ")}`,
+      );
+    });
+  }
+
   it("importing the HTML subpath DOES load the heavy graph (negative test is not vacuous)", () => {
     const graph = resolvedGraph(srcUrl("html.mjs"));
     assert.ok(

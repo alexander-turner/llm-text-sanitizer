@@ -75,3 +75,72 @@ attributes (`src`/`href`/`background`/`srcset`/`ping`, form `action`/`formaction
 
 Each threat carries a `reason` and the destination `host` (never the
 payload-bearing query/fragment), suitable for a warning shown to the operator.
+
+## Confusable folding (tool input)
+
+`./confusables` folds look-alike glyphs in tool-call **input** fields (paths,
+commands) to their ASCII canon. A denied path/command spelled in homoglyphs (a
+Cyrillic `а` for ASCII `a`) would not match an ASCII deny rule; folding closes
+that cross-script bypass (CVE-2025-54794 class). Folding is per-character and
+context-free, so it also catches an **isolated** confusable with no ASCII anchor
+that a context-sensitive canonicaliser would leave alone. The homoglyph engine
+is **injected** (`{ scan }`)—the package owns no glyph map. An all-ASCII field
+never invokes the scanner. This narrows a steganographic channel; it is not an
+enforcement boundary (distinct code points would not match a deny rule anyway).
+
+## Instruction-file scanning
+
+`./instructions` scans the markdown that loads as model context (`CLAUDE.md`,
+`AGENTS.md`, `SKILL.md`, any `.claude` markdown—a **caller-supplied glob
+set**), which bypasses a tool-output sanitizer entirely. It flags long invisible
+runs, decodes the two common smuggling encodings (Unicode **tag** characters →
+ASCII, zero-width **binary**), and catches scattered payloads below the long-run
+threshold. `cleanFile` strips the payload in place (Layer-1 strip), failing loud
+if a contaminated file cannot be rewritten.
+
+## User-prompt verdict
+
+`./prompt` classifies a submitted prompt as **pass / pass-with-note / block** on
+payload-capable invisible Unicode and ANSI. A prompt-submission channel usually
+cannot rewrite the prompt in place, so the only neutralization is to block.
+One carve-out: a prompt whose only escape content is display-only SGR color
+passes with a note (pasting colored terminal output is the common case, and SGR
+cannot move the cursor, erase, or carry an OSC payload).
+
+## Tool-output pipeline & Layer 5
+
+`./output` runs Layers 1–4 over structured tool output, **preserving its shape**
+(a harness that gets a shape-mismatched value silently shows the raw output).
+Layer 4 (secret redaction) is an **injected** redactor and is the one
+fail-closed path: a redactor that throws makes the pipeline rethrow, so the
+caller suppresses the output rather than emit an unvetted value. Layer 5 is a
+deliberately thin, safe slot: the injected filter returns **verbatim spans to
+delete** (never replacement text), so even a compromised filter can only remove
+legitimate content—it can never inject bytes into the model’s view. A live
+second-LLM injection filter is the caller’s to wire behind that contract.
+
+## Edit-repair / rehydration
+
+Sanitizing the model’s view of a file makes that view diverge from disk: Layer 1
+deletes invisible/ANSI runs, and Layer 4 replaces secrets with `[REDACTED…]`
+placeholders. An Edit whose `old_string` was copied from that view then fails
+exact-match, and a whole-file Write would persist the placeholder over the real
+secret—so a sanitizer _without_ rehydration silently breaks editing.
+`./rehydrate` (offset machinery in `./view-map`) re-derives the sanitized view,
+locates the model’s `old_string` in it, and maps it span-exact back to the
+on-disk bytes across both placeholder expansion and stripped invisible runs,
+substituting placeholders in `new_string` with the real secrets. Two invariants
+are load-bearing and **fail closed**:
+
+- **Never mis-anchor.** Greedy deletion alignment is ambiguous when a stripped
+  run abuts kept text it resembles; any call that does not re-clean back to the
+  span’s view, matches multiple view locations, or cuts through a placeholder is
+  **denied** with an instructive reason rather than edited at a guessed anchor.
+- **Never expose a secret.** Before rewriting, the would-be post-edit content is
+  re-sanitized (Layer 1 + the injected redactor); if any rehydrated secret would
+  survive in the model’s next view (e.g. an edit that relabels a field the
+  redactor no longer recognizes), the call is **denied**. The secret flows
+  disk → tool input only; the model’s next view is sanitized again.
+
+File access and the redactor are injected via `io`; the package performs no I/O
+of its own and bundles no secret engine.

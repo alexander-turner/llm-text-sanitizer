@@ -82,7 +82,12 @@
     "exfiltration",
     "rag",
     "agent",
-    "security"
+    "security",
+    "homoglyph",
+    "confusables",
+    "redaction",
+    "tool-output",
+    "edit-repair"
   ],
   "exports": {
     ".": {
@@ -96,6 +101,30 @@
     "./html": {
       "types": "./types/html.d.mts",
       "default": "./src/html.mjs"
+    },
+    "./confusables": {
+      "types": "./types/confusables.d.mts",
+      "default": "./src/confusables.mjs"
+    },
+    "./instructions": {
+      "types": "./types/instructions.d.mts",
+      "default": "./src/instructions.mjs"
+    },
+    "./prompt": {
+      "types": "./types/prompt.d.mts",
+      "default": "./src/prompt.mjs"
+    },
+    "./output": {
+      "types": "./types/output.d.mts",
+      "default": "./src/output.mjs"
+    },
+    "./view-map": {
+      "types": "./types/view-map.d.mts",
+      "default": "./src/view-map.mjs"
+    },
+    "./rehydrate": {
+      "types": "./types/rehydrate.d.mts",
+      "default": "./src/rehydrate.mjs"
     }
   },
   "files": [

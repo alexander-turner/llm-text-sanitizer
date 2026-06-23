@@ -10,12 +10,13 @@
  * subpath entries; import those directly when you want a single layer without
  * the convenience wrapper.
  */
-import {
-  stripInvisibleWithReport,
-  LONG_RUN_RE,
-  CATEGORY,
-  CATEGORY_LABELS,
-} from "./invisible.mjs";
+import { LONG_RUN_RE, CATEGORY, CATEGORY_LABELS } from "./invisible.mjs";
+import { applyLayer1, LONE_SURROGATE_RE } from "./layer1.mjs";
+
+// Layer 1 lives in the zero-dependency `./layer1.mjs`, shared verbatim with the
+// tool-output pipeline (`./output`) and the Edit-repair rehydrator
+// (`./rehydrate`) so every consumer derives the identical model-facing view.
+export { applyLayer1, stripAnsiFully, LONE_SURROGATE_RE } from "./layer1.mjs";
 
 export {
   stripInvisible,
@@ -46,89 +47,6 @@ export {
   SECRET_HINT_EXT,
   matchesSecretHint,
 } from "./gates.mjs";
-
-// The two raw control introducers an ANSI sequence can start with: 7-bit
-// ESC (U+001B) and the 8-bit C1 CSI (U+009B). Both are category Cc, so the
-// invisible-char pass (which targets Cf / variation / blank fillers) never
-// removes them; the residual sweep below is what guarantees neither survives.
-// eslint-disable-next-line no-control-regex -- matching the raw introducers is the point
-const CONTROL_INTRODUCER_RE = /[\u001b\u009b]/g;
-
-// Full ANSI escape grammar (CSI/SGR/OSC-with-BEL), not just SGR: the Layer-1
-// guarantee is that no control introducer survives, and a cursor-move or
-// erase sequence is as much a display-spoofing hazard as a color one. The
-// pattern is linear (every quantified run is bounded or non-overlapping), so it
-// carries no catastrophic-backtracking risk on adversarial input.
-// prettier-ignore
-// eslint-disable-next-line no-control-regex -- matching ESC-led sequences is the point
-const ANSI_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
-
-// Unpaired UTF-16 surrogates (high not followed by low, or low not preceded by
-// high). Normalized before the HTML parser, which throws on a stray byte —
-// which would otherwise let a single malformed code unit suppress all output.
-const LONE_SURROGATE_RE =
-  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
-
-/**
- * Strip ANSI escape sequences to a fixed point. Removing one sequence can
- * reconstitute another around it (a lone ESC left of `ESC[32m[0m` gains the
- * trailing `[0m` once the inner sequence is removed, forming a brand-new valid
- * sequence the single pass would miss), so iterate until stable: every changed
- * pass consumes at least one ESC introducer, so the pass count is bounded by
- * the input's ESC count, and ANSI-free text exits after one pass.
- * @param {string} input
- * @returns {string}
- */
-function stripAnsiFully(input) {
-  let prev = input;
-  let out = prev.replace(ANSI_RE, "");
-  while (out !== prev) {
-    prev = out;
-    out = prev.replace(ANSI_RE, "");
-  }
-  return out;
-}
-
-/**
- * Layer 1: ANSI + invisible-char strip with a result guaranteed free of every
- * raw ANSI control introducer (7-bit ESC U+001B and 8-bit C1 CSI U+009B).
- *
- * Removing an invisible character can reconstitute an escape its split hid from
- * the ANSI pass (`ESC`<ZWSP>`[32m` → `ESC[32m`), so strip ANSI again after the
- * invisible pass — but only when stripInvisible changed something, since
- * reconstitution is impossible otherwise and the re-strip is a wasted pass on
- * the hot clean path. The ANSI strip still cannot match an *incomplete*
- * reconstituted sequence (a lone `ESC[` left when an inner complete sequence is
- * removed from a nested split), so a final sweep removes every residual raw
- * introducer outright — that sweep, not the regex matching, is the guarantee
- * that no control introducer survives. `deAnsi` is the ANSI strip of the
- * original (invisible runs intact), the scope a LONG_RUN payload check needs.
- * @param {string} text
- * @returns {{ cleaned: string, deAnsi: string, found: string[] }}
- */
-function applyLayer1(text) {
-  const deAnsi = stripAnsiFully(text);
-  // stripInvisibleWithReport returns `found` for exactly the categories it
-  // removed — so a ZWNJ/ZWJ the carve-out PRESERVES never registers as a strip,
-  // and the leading-BOM exception is already handled inside it.
-  const { cleaned: afterInvis, found } = stripInvisibleWithReport(deAnsi);
-  let ansiFound = deAnsi.length !== text.length;
-
-  let cleaned = afterInvis;
-  if (afterInvis !== deAnsi) {
-    const reStripped = stripAnsiFully(afterInvis);
-    if (reStripped.length !== afterInvis.length) ansiFound = true;
-    cleaned = reStripped;
-  }
-  const swept = cleaned.replace(CONTROL_INTRODUCER_RE, "");
-  if (swept !== cleaned) {
-    cleaned = swept;
-    ansiFound = true;
-  }
-
-  if (ansiFound) found.push(CATEGORY.ANSI);
-  return { cleaned, deAnsi, found };
-}
 
 /** @param {{ comments: number, hidden: number }} removed */
 function describeRemoved(removed) {

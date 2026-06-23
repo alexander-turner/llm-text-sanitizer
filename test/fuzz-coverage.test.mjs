@@ -21,6 +21,12 @@ import path from "node:path";
 import * as invisible from "../src/invisible.mjs";
 import * as html from "../src/html.mjs";
 import * as index from "../src/index.mjs";
+import * as confusables from "../src/confusables.mjs";
+import * as instructions from "../src/instructions.mjs";
+import * as prompt from "../src/prompt.mjs";
+import * as viewMap from "../src/view-map.mjs";
+import * as rehydrate from "../src/rehydrate.mjs";
+import * as output from "../src/output.mjs";
 
 // Functions that ingest untrusted text/URLs/ranges and so owe a fuzz target.
 // Intentionally excluded (documented so the omission is a choice, not a miss):
@@ -41,6 +47,21 @@ const FUZZ_REQUIRED = [
   "detectExfil",
   "checkExfilUrl",
   "urlHost",
+  // Agent-pipeline transforms/parsers over untrusted input (one named fuzz
+  // target each — the same obligation extended to the new entry points).
+  "normalizeConfusables",
+  "foldConfusables",
+  "scanText",
+  "decodeRun",
+  "classifyPrompt",
+  "alignDeletions",
+  "resolveSpan",
+  "rehydrateNewString",
+  "occurrences",
+  "rehydrateRedacted",
+  "sanitizeText",
+  "sanitizeValue",
+  "deleteVerbatimSpans",
 ];
 
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -73,7 +94,17 @@ const fuzzFiles = readdirSync(testDir)
   .filter((file) => file.source.includes("fc.assert("));
 
 const exportedFunctions = new Map(
-  [invisible, html, index]
+  [
+    invisible,
+    html,
+    index,
+    confusables,
+    instructions,
+    prompt,
+    viewMap,
+    rehydrate,
+    output,
+  ]
     .flatMap((mod) => Object.entries(mod))
     .filter(([, value]) => typeof value === "function"),
 );
