@@ -41,7 +41,6 @@ const result = await sanitize(fetchedPageSource, { html: true });
 //   result.warnings  — human-facing notices (long-run alerts, exfil reasons, …)
 ```
 
-
 `sanitize` never throws and never silently drops content: any change to the
 text comes with at least one `warnings` entry. The `{ html: true }` path
 lazy-loads the HTML deps, so a Layer-1-only caller never pays for them.
