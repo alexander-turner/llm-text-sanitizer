@@ -14,10 +14,23 @@ adhere to [Semantic Versioning](https://semver.org/).
   declarations no longer infer `any`, which broke `tsc` for consumers importing
   them under strict `checkJs`.
 
-## [1.0.1] - 2026-06-22
+## [1.0.3] - 2026-06-23
 
 ### Changed
 
+- ci: drop security-vulnerability-scan workflow
+- ci: run security scan monthly instead of weekly
+- ci: run template-sync weekly instead of daily
+- ci: drop @claude responder, pin security scan to Sonnet
+
+## [1.0.2] - 2026-06-23
+
+### Changed
+
+- fix(release): base version on the reachable tag, not the global highest
+- docs: recommend opening a PR when work is complete; dedupe changelog
+- fix(release): bump from max of npm and highest tag
+- docs: release 1.0.1 [skip ci]
 - fix(release): declare repository metadata for npm provenance
 - ci(release): adopt punctilio auto-version flow
 - docs(changelog): add fragment for version-update release rework

@@ -15,12 +15,6 @@ SCRIPTS = REPO_ROOT / ".github" / "scripts"
 CASES = [
     # check-token-scope.sh requires TOKEN
     ("check-token-scope.sh", ["TOKEN"]),
-    # check-existing-security-pr.sh requires GH_TOKEN and DEFAULT_BRANCH
-    ("check-existing-security-pr.sh", ["GH_TOKEN", "DEFAULT_BRANCH"]),
-    # list-dependabot-prs.sh requires GH_TOKEN
-    ("list-dependabot-prs.sh", ["GH_TOKEN"]),
-    # fetch-security-report.sh requires GH_TOKEN and REPO
-    ("fetch-security-report.sh", ["GH_TOKEN", "REPO"]),
     # request-claude-resolve.sh requires PR_NUM
     ("request-claude-resolve.sh", ["PR_NUM"]),
     # template-sync.sh requires GITHUB_OUTPUT
