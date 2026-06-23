@@ -25,23 +25,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Autofix is useless without a PAT/App token: a GITHUB_TOKEN push does not
+      # re-trigger workflows, so the Required format-check would stay pending on
+      # the fixed commit and block the PR. So gate the real work on the secret
+      # being present. `secrets` can't be read in a job-level `if`, hence this
+      # preflight step that exposes it as a step output; when it's absent every
+      # later step is skipped and the job ends green (a no-op), instead of the
+      # checkout failing on an empty token.
+      - name: Check for AUTOFIX_TOKEN
+        id: guard
+        env:
+          AUTOFIX_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
+        run: |
+          if [ -n "$AUTOFIX_TOKEN" ]; then
+            echo "enabled=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::AUTOFIX_TOKEN secret is not set; skipping autofix. Add a fine-grained PAT (contents: write) so the fix-commit re-triggers format-check."
+          fi
+
+      - if: steps.guard.outputs.enabled == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.event.pull_request.head.ref }}
-          # Push the fix with a PAT/App token, NOT GITHUB_TOKEN: a GITHUB_TOKEN
-          # push does not re-trigger workflows, so the Required format-check
-          # would stay pending on the new commit and block the PR forever.
-          # Provide a fine-grained PAT (contents: write) or App token as the
-          # `AUTOFIX_TOKEN` secret. If unset, checkout falls back to
-          # GITHUB_TOKEN: the fix is still pushed, but you must re-run
-          # format-check manually on the new commit.
-          token: ${{ secrets.AUTOFIX_TOKEN || github.token }}
+          # PAT/App token, NOT GITHUB_TOKEN, so the push re-triggers format-check.
+          token: ${{ secrets.AUTOFIX_TOKEN }}
           persist-credentials: true
           fetch-depth: 0
 
       - name: Setup base environment
+        if: steps.guard.outputs.enabled == 'true'
         uses: ./.github/actions/setup-base-env
 
       - name: Apply Prettier and push any fixes
-        if: hashFiles('package.json') != ''
+        if: steps.guard.outputs.enabled == 'true' && hashFiles('package.json') != ''
         run: bash .github/scripts/format-autofix.sh
