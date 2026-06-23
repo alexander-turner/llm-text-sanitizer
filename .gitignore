@@ -47,3 +47,7 @@ __pycache__/
 *.pyc
 .venv/
 .uv/
+
+# Stryker mutation testing
+.stryker-tmp/
+reports/mutation/

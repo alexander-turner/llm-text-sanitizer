@@ -15,6 +15,10 @@ export default tseslint.config(
       ".hooks/**",
       "config/**",
       "tests/**",
+      // Stryker copies the project into a sandbox here during a mutation run and
+      // mutates the sources in place; never lint that transient mutated copy.
+      ".stryker-tmp/**",
+      "reports/**",
     ],
   },
   js.configs.recommended,

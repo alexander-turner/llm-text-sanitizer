@@ -21,6 +21,7 @@
     "build:types": "tsc -p tsconfig.build.json",
     "prepack": "pnpm build:types",
     "lint": "eslint .",
+    "test:mutation": "stryker run",
     "format": "prettier --write ."
   },
   "lint-staged": {
@@ -57,6 +58,8 @@
     "@commitlint/cli": "^21.0.1",
     "@commitlint/config-conventional": "^21.0.1",
     "@eslint/js": "10.0.1",
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/tap-runner": "^9.6.1",
     "@types/node": "25.9.1",
     "c8": "11.0.0",
     "eslint": "10.4.0",

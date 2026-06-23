@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "packageManager": "pnpm",
+  "plugins": ["@stryker-mutator/tap-runner"],
+  "testRunner": "tap",
+  "tap": {
+    "testFiles": ["test/**/*.test.mjs"],
+    "nodeArgs": ["--test-reporter=tap"]
+  },
+  "mutate": ["src/*.mjs"],
+  "coverageAnalysis": "perTest",
+  "ignoreStatic": false,
+  "reporters": ["html", "clear-text", "progress", "json"],
+  "timeoutMS": 60000,
+  "thresholds": {
+    "high": 90,
+    "low": 85,
+    "break": 83
+  }
+}

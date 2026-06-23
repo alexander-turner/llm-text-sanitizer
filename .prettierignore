@@ -22,6 +22,10 @@ uv.lock
 # Coverage
 coverage/
 
+# Stryker mutation testing (generated)
+.stryker-tmp/
+reports/mutation/
+
 # Release sections are written by scripts/promote-changelog.mjs — keep the exact
 # ASCII `## [x.y.z] - date` formatting; punctilio would rewrite the hyphen and dashes.
 CHANGELOG.md
