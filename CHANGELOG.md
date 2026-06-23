@@ -8,6 +8,20 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.2.0] - 2026-06-23
+
+### Changed
+
+- docs: rework README into a scannable entry-point table
+- feat(cli): bridge classifyPrompt, sanitizeText, and instruction-file ops
+- docs: compact the Non-JS pipelines README section
+- fix(python): fork-safety, clearer errors, and transport fuzzing
+- style: format cli.test.mjs with prettier
+- fix(python): harden the persistent worker against stderr deadlock and leaks
+- test: isolate session-setup git from ambient insteadOf rewriting
+- feat(python): amortize HTML module-load via an auto-spun shared worker
+- feat: add stdin/stdout CLI and Python client for non-JS pipelines
+
 ## [1.1.1] - 2026-06-23
 
 ### Changed
