@@ -44,6 +44,15 @@ def run_session_setup(
             "CLAUDE_PROJECT_DIR": str(sandbox),
             "CLAUDE_ENV_FILE": str(env_file),
             "GH_TOKEN": "fake",
+            # Isolate the script's `git remote get-url` from ambient git config.
+            # Proxy environments (incl. this one's CI) register a global
+            # `url.<proxy>.insteadOf = https://github.com/`, which rewrites the
+            # github-https/ssh fixtures to the proxy form before the script sees
+            # them — making GH_REPO extraction look like it fired on a plain
+            # GitHub URL. Pinning config to /dev/null lets each fixture exercise
+            # the regex against the literal URL it sets.
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
         }
     )
     if extra_env:
