@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.1.0] - 2026-06-23
+
+### Changed
+
+- fix: bound ANSI_RE private-intro class to kill polynomial backtracking (CodeQL js/polynomial-redos
+- feat: add agent-pipeline entry points (input, output, prompt, instructions, edit-repair)
+
 ## [1.0.4] - 2026-06-23
 
 ### Changed
