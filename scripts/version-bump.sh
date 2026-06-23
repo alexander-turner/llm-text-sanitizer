@@ -60,13 +60,13 @@ LAST_TAG=$(git describe --tags --match "v*" --abbrev=0 HEAD 2>/dev/null || echo 
 # The version base must exceed every existing release marker, not just npm. npm
 # and git tags are both declared sources of truth, and a flow migration or a
 # publish that failed after tagging can leave them disagreeing (e.g. a tag
-# pushed without a matching npm publish). Bump from the max of npm and the
-# highest existing tag so the computed version never goes backward and never
-# collides with a tag that already exists.
-HIGHEST_TAG_VERSION=$(git tag -l 'v*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
-BASE_VERSION=$(max_version "$CURRENT_VERSION" "$HIGHEST_TAG_VERSION")
+# pushed without a matching npm publish). Bump from the max of npm and LAST_TAG
+# so the computed version never goes backward and never collides with the tag of
+# HEAD's lineage. Using LAST_TAG (the same reachable tag the commit range is cut
+# from) keeps the version base aligned with the commits being analyzed.
+BASE_VERSION=$(max_version "$CURRENT_VERSION" "${LAST_TAG#v}")
 if [ "$BASE_VERSION" != "$CURRENT_VERSION" ]; then
-  log "Highest tag (v$HIGHEST_TAG_VERSION) is ahead of npm ($CURRENT_VERSION); bumping from $BASE_VERSION."
+  log "Latest tag ($LAST_TAG) is ahead of npm ($CURRENT_VERSION); bumping from $BASE_VERSION."
 fi
 
 if [ -n "$LAST_TAG" ]; then
