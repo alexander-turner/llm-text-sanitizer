@@ -8,6 +8,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.1.1] - 2026-06-23
+
+### Changed
+
+- ci(mutation): drop redundant fetch fallback in change gate
+- ci(mutation): run Stryker as a required PR check
+- test(mutation): kill surviving mutants with exact-assertion guards
+- test(mutation): add Stryker mutation testing for src/*.mjs
+
 ## [1.1.0] - 2026-06-23
 
 ### Changed
