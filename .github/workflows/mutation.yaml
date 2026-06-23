@@ -1,0 +1,82 @@
+name: Mutation tests
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**/*.mjs"
+      - "test/**/*.mjs"
+      - "stryker.conf.json"
+      - "package.json"
+      - ".github/workflows/mutation.yaml"
+      - ".github/scripts/mutation-changed.sh"
+  # No paths filter on pull_request: this is a Required check, and a workflow-level
+  # path filter would skip the whole workflow (including the mutation-passed
+  # reporter) on PRs that don't touch these paths, stranding the check at
+  # "Expected — Waiting". The job below cheaply no-ops via mutation-changed.sh
+  # when nothing mutation-relevant changed, so the gate still reports green.
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    # Stryker re-runs the suite once per mutant; the full project is ~1200
+    # mutants at a few seconds each across 4 workers. 30 min is comfortable
+    # headroom over the observed ~12 min wall time.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          # mutation-changed.sh diffs the PR head against its base; full history
+          # is the simplest way to guarantee the base commit resolves.
+          fetch-depth: 0
+
+      - name: Skip when no mutation-relevant files changed
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if bash .github/scripts/mutation-changed.sh; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No mutation-relevant files changed, skipping Stryker"
+          fi
+
+      - name: Setup base environment
+        if: steps.changed.outputs.run == 'true'
+        uses: ./.github/actions/setup-base-env
+
+      - name: Run mutation testing
+        if: steps.changed.outputs.run == 'true'
+        run: pnpm test:mutation
+
+      - name: Upload mutation report
+        if: ${{ always() && steps.changed.outputs.run == 'true' }}
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Stable Required check: runs even when `mutation` is cancelled/skipped, so a
+  # protected branch never gets stuck on a check that never reports.
+  mutation-passed:
+    if: always()
+    needs: [mutation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any required job did not pass
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
