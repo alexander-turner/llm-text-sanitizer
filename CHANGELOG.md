@@ -8,6 +8,23 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.0.2] - 2026-06-23
+
+### Changed
+
+- fix(release): base version on the reachable tag, not the global highest
+- docs: recommend opening a PR when work is complete; dedupe changelog
+- fix(release): bump from max of npm and highest tag
+- docs: release 1.0.1 [skip ci]
+- fix(release): declare repository metadata for npm provenance
+- ci(release): adopt punctilio auto-version flow
+- docs(changelog): add fragment for version-update release rework
+- ci(release): publish release without an explicit tag push
+- Update README to format project title as code
+- Update README by removing install and license sections
+- ci: guard that a package.json bump ships its CHANGELOG section
+- docs(changelog): roll changelog.d fragments into 1.0.1 section
+
 ## [1.0.1] - 2026-06-22
 
 ### Added
