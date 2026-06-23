@@ -10,6 +10,9 @@ on:
       - "**/*.jsx"
       - "**/*.mjs"
       - "**/*.cjs"
+      - "**/*.mts"
+      - "**/*.cts"
+      - "**/tsconfig*.json"
       - "package.json"
       - ".github/workflows/node-tests.yaml"
   # No paths filter on pull_request: this is a Required check, and a workflow-level
