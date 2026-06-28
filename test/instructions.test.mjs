@@ -397,6 +397,24 @@ describe("symlink containment", () => {
     );
   });
 
+  it("SKIPS an in-cwd dangling symlink and still scans the valid files", () => {
+    // A stale symlink in the project must not abort the whole scan: it resolves
+    // to nothing (ENOENT), so it is dropped while real instruction files remain.
+    symlinkSync(join(tmpDir, "gone.md"), join(tmpDir, "AGENTS.md"), "file");
+    writeFileSync(
+      join(tmpDir, "CLAUDE.md"),
+      `# h\n${tagChars("payload xyz123")}\n`,
+    );
+    const found = findInstructionFiles(GLOBS, { cwd: tmpDir });
+    assert.deepEqual(found, [join(tmpDir, "CLAUDE.md")]);
+    const out = scanInstructionFiles(GLOBS, { cwd: tmpDir });
+    assert.deepEqual(
+      out.map((e) => e.file),
+      ["CLAUDE.md"],
+      "the dangling symlink is skipped, the real file is still scanned",
+    );
+  });
+
   it("cleanFile THROWS rather than writing THROUGH a symlink", () => {
     const target = join(tmpDir, "real-CLAUDE.md");
     const original = `# t\n${tagChars("payload x".repeat(2))}\n`;

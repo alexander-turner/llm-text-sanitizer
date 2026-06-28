@@ -129,19 +129,34 @@ function isContained(realRoot, realChild) {
 }
 
 /**
- * Resolve `absPath` to a real (symlink-followed) absolute path and assert it is
- * contained within `realRoot`; THROW naming the offending path/pattern when it
- * escapes. A scanner pointed outside its own tree is a misconfiguration the
- * caller must see — failing loud beats silently skipping a file the caller
- * believes was scanned. `pattern` is included in the message for diagnosis.
- * @param {string} absPath  absolute path to a glob match (already exists)
+ * Classify a glob match for containment: resolve it to a real (symlink-
+ * followed) path and decide whether to keep, drop, or reject it. Two failure
+ * modes are kept distinct:
+ *
+ *   - The realpath ESCAPES `realRoot` → THROW. A scanner pointed outside its
+ *     own tree is a caller misconfiguration that must surface loudly, not a
+ *     file silently skipped while the caller believes it was scanned.
+ *   - The path cannot be resolved at all (ENOENT/EACCES — a dangling symlink or
+ *     unreadable entry that still lives inside the tree) → return false to SKIP
+ *     it, matching scanInstructionFiles' existing skip-on-unreadable behavior.
+ *     A stale symlink in a project must not abort scanning every other file.
+ *
+ * A genuine resolution failure is never allowed to masquerade as a
+ * containment pass: an unresolvable path is skipped, only a successfully
+ * resolved in-tree path returns true.
+ * @param {string} absPath  absolute path to a glob match
  * @param {string} realRoot  realpath of the scan root
  * @param {string} pattern  the glob that produced this match
- * @returns {void}
+ * @returns {boolean} true to keep the match, false to skip an unresolvable one
  */
-function assertContained(absPath, realRoot, pattern) {
-  const real = realpathSync(absPath);
-  if (isContained(realRoot, real)) return;
+function keepContained(absPath, realRoot, pattern) {
+  let real;
+  try {
+    real = realpathSync(absPath);
+  } catch {
+    return false; // dangling/unreadable in-cwd match: skip, do not abort
+  }
+  if (isContained(realRoot, real)) return true;
   throw new Error(
     `instruction-file path escapes scan root: pattern ${JSON.stringify(
       pattern,
@@ -155,11 +170,12 @@ function assertContained(absPath, realRoot, pattern) {
  * Expand `globs` (relative to `cwd`) to absolute file paths, skipping
  * `node_modules`. The glob set is the caller's instruction-file convention.
  *
- * Containment is enforced: every match is resolved to its real (symlink-
- * followed) path and must live within `cwd`'s realpath. A match that escapes
- * the root — via `..`, an absolute-path glob, or a symlink pointing outside —
- * THROWS rather than being scanned or silently dropped, since reaching outside
- * the tree is a caller misconfiguration that must surface loudly.
+ * Containment is enforced per match (see {@link keepContained}): a match whose
+ * realpath escapes `cwd` — via `..`, an absolute-path glob, or a symlink
+ * pointing outside — THROWS, since reaching outside the tree is a caller
+ * misconfiguration. A match that simply cannot be resolved (a dangling symlink
+ * or unreadable entry inside the tree) is SKIPPED, so one stale symlink never
+ * aborts scanning the rest of the project.
  * @param {string[]} globs
  * @param {{ cwd?: string }} [options]
  * @returns {string[]}
@@ -176,8 +192,7 @@ export function findInstructionFiles(globs, { cwd = process.cwd() } = {}) {
       // cwd-relative names otherwise; joining an already-absolute name would
       // double the prefix into a nonexistent path (the absolute-glob miss bug).
       const absPath = isAbsolute(name) ? name : join(cwd, name);
-      assertContained(absPath, realRoot, pattern);
-      seen.add(absPath);
+      if (keepContained(absPath, realRoot, pattern)) seen.add(absPath);
     }
   return [...seen];
 }
