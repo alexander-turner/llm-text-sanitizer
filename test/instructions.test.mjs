@@ -11,6 +11,10 @@ import {
   writeFileSync,
   rmSync,
   readFileSync,
+  symlinkSync,
+  chmodSync,
+  statSync,
+  readdirSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -286,5 +290,226 @@ describe("cleanFile", () => {
     writeFileSync(file, original);
     assert.equal(cleanFile(file), false);
     assert.equal(readFileSync(file, "utf-8"), original);
+  });
+});
+
+// ─── containment: path traversal (bug #1) ────────────────────────────────────
+
+describe("findInstructionFiles containment", () => {
+  let tmpDir;
+  let outsideDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "contain-cwd-"));
+    outsideDir = mkdtempSync(join(tmpdir(), "contain-out-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("THROWS naming the escaping pattern for a `..` traversal glob", () => {
+    // A secret living outside the scan root, reachable only via `..`.
+    writeFileSync(join(outsideDir, "secret.md"), "top secret\n");
+    // Walk from tmpDir up to outsideDir by name (sibling of tmpDir under tmpdir).
+    const rel = join("..", `${outsideDir.split("/").pop()}`, "secret.md");
+    assert.throws(
+      () => findInstructionFiles([rel], { cwd: tmpDir }),
+      (err) =>
+        err instanceof Error &&
+        /escapes scan root/.test(err.message) &&
+        err.message.includes(rel),
+      "a `..` glob reaching outside cwd must throw, not silently read",
+    );
+  });
+
+  it("THROWS for an absolute glob whose match lives outside cwd", () => {
+    writeFileSync(join(outsideDir, "CLAUDE.md"), "x\n");
+    const abs = join(outsideDir, "CLAUDE.md");
+    assert.throws(
+      () => findInstructionFiles([abs], { cwd: tmpDir }),
+      /escapes scan root/,
+    );
+  });
+
+  it("does NOT throw for a sibling dir sharing a name prefix with cwd", () => {
+    // `/x/proj-evil` must not count as contained in `/x/proj`: the segment
+    // boundary check rejects the prefix-only match. No glob hits it from tmpDir,
+    // so the call simply returns []; the point is it neither throws nor matches.
+    writeFileSync(join(tmpDir, "CLAUDE.md"), "x");
+    const found = findInstructionFiles(["CLAUDE.md"], { cwd: tmpDir });
+    assert.deepEqual(found, [join(tmpDir, "CLAUDE.md")]);
+  });
+});
+
+// ─── absolute-glob in-cwd is found (bug #3) ──────────────────────────────────
+
+describe("findInstructionFiles absolute glob", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "abs-glob-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("an absolute glob pointing at an in-cwd file IS found (no doubled prefix)", () => {
+    const file = join(tmpDir, "CLAUDE.md");
+    writeFileSync(file, "x");
+    // Pre-fix: join(cwd, name) doubled the absolute prefix => nonexistent path,
+    // so the file was silently MISSED. It must be returned verbatim here.
+    const found = findInstructionFiles([file], { cwd: tmpDir });
+    assert.deepEqual(found, [file]);
+  });
+
+  it("an absolute glob is also scanned end-to-end for its payload", () => {
+    const file = join(tmpDir, "CLAUDE.md");
+    writeFileSync(file, `# h\n${tagChars("evil payload")}\n`);
+    const out = scanInstructionFiles([file], { cwd: tmpDir });
+    assert.equal(out.length, 1);
+    assert.equal(out[0].findings[0].decoded, "evil payload");
+  });
+});
+
+// ─── symlink handling (bug #2) ───────────────────────────────────────────────
+
+describe("symlink containment", () => {
+  let tmpDir;
+  let outsideDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "symlink-cwd-"));
+    outsideDir = mkdtempSync(join(tmpdir(), "symlink-out-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("THROWS when a symlinked dir inside cwd resolves to a file outside cwd", () => {
+    // outsideDir/.claude/skills/evil/SKILL.md, reached via tmpDir/.claude -> outsideDir/.claude
+    const outClaudeSkill = join(outsideDir, ".claude", "skills", "evil");
+    mkdirSync(outClaudeSkill, { recursive: true });
+    writeFileSync(join(outClaudeSkill, "SKILL.md"), "payload\n");
+    symlinkSync(join(outsideDir, ".claude"), join(tmpDir, ".claude"), "dir");
+    assert.throws(
+      () => findInstructionFiles(GLOBS, { cwd: tmpDir }),
+      /escapes scan root/,
+      "a symlinked dir escaping cwd must be caught by the realpath check",
+    );
+  });
+
+  it("cleanFile THROWS rather than writing THROUGH a symlink", () => {
+    const target = join(tmpDir, "real-CLAUDE.md");
+    const original = `# t\n${tagChars("payload x".repeat(2))}\n`;
+    writeFileSync(target, original);
+    const link = join(tmpDir, "CLAUDE.md");
+    symlinkSync(target, link, "file");
+    assert.throws(() => cleanFile(link), /refusing to clean through a symlink/);
+    // The symlink target is left byte-for-byte unchanged (no write-through).
+    assert.equal(readFileSync(target, "utf-8"), original);
+  });
+});
+
+// ─── cleanFile hostile pre-state matrix ──────────────────────────────────────
+
+describe("cleanFile hostile pre-states", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "clean-prestate-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("missing path: throws a clear ENOENT-class error (no silent success)", () => {
+    assert.throws(() => cleanFile(join(tmpDir, "nope.md")), /ENOENT/);
+  });
+
+  it("directory at path: throws (EISDIR-class), never returns silently", () => {
+    const dir = join(tmpDir, "CLAUDE.md");
+    mkdirSync(dir);
+    assert.throws(() => cleanFile(dir));
+  });
+
+  it("dangling symlink: refuses (symlink check fires before read)", () => {
+    const link = join(tmpDir, "CLAUDE.md");
+    symlinkSync(join(tmpDir, "does-not-exist.md"), link, "file");
+    assert.throws(() => cleanFile(link), /refusing to clean through a symlink/);
+  });
+
+  it("regular contaminated file: cleans and returns true", () => {
+    const file = join(tmpDir, "CLAUDE.md");
+    writeFileSync(file, `# ok\n${tagChars("payload here now")}\n`);
+    assert.equal(cleanFile(file), true);
+    assert.doesNotMatch(readFileSync(file, "utf-8"), /[\u{E0001}-\u{E007F}]/u);
+  });
+});
+
+// ─── scan/clean contract coherence (bug #4) ──────────────────────────────────
+
+describe("scan/clean contract", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "scan-clean-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("clean does NOT rewrite a file scan reports clean (2 stray ZWSPs)", () => {
+    // Two scattered ZWSPs: below LONG_RUN_THRESHOLD and SCATTERED_THRESHOLD, so
+    // scanText flags nothing. Pre-fix cleanFile stripped them anyway (the
+    // asymmetry). Contract: clean strips exactly what scan flags => no rewrite.
+    const file = join(tmpDir, "CLAUDE.md");
+    const original = `a${cp(0x200b)}b${cp(0x200b)}c\n`;
+    writeFileSync(file, original);
+    assert.deepEqual(
+      scanText(original),
+      [],
+      "precondition: scan flags nothing",
+    );
+    assert.equal(cleanFile(file), false);
+    assert.equal(
+      readFileSync(file, "utf-8"),
+      original,
+      "scan-clean file must be left byte-identical",
+    );
+  });
+
+  it("clean DOES strip when scan flags (long run) — payload removed", () => {
+    const file = join(tmpDir, "CLAUDE.md");
+    const original = `x${zwRun(LONG_RUN_THRESHOLD)}y\n`;
+    writeFileSync(file, original);
+    assert.ok(scanText(original).length > 0, "precondition: scan flags it");
+    assert.equal(cleanFile(file), true);
+    assert.equal(readFileSync(file, "utf-8"), "xy\n");
+  });
+});
+
+// ─── atomic write + mode preservation (bug #5) ───────────────────────────────
+
+describe("cleanFile atomic write", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "atomic-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("preserves the file mode across the rewrite", () => {
+    const file = join(tmpDir, "CLAUDE.md");
+    writeFileSync(file, `# h\n${tagChars("rm payload now")}\n`);
+    chmodSync(file, 0o640);
+    const before = statSync(file).mode;
+    assert.equal(cleanFile(file), true);
+    assert.equal(statSync(file).mode, before, "mode must survive the rewrite");
+  });
+
+  it("leaves no temp files behind in the directory", () => {
+    const file = join(tmpDir, "CLAUDE.md");
+    writeFileSync(file, `# h\n${tagChars("payload payload")}\n`);
+    cleanFile(file);
+    // The atomic rename consumes the temp; only the cleaned file remains.
+    assert.deepEqual(readdirSync(tmpDir), ["CLAUDE.md"]);
   });
 });

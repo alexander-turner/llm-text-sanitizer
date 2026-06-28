@@ -13,8 +13,15 @@
  * instruction files live under (e.g. `["CLAUDE.md", "AGENTS.md",
  * ".claude/**\/*.md", "**\/SKILL.md"]`), so no agent's convention is baked in.
  */
-import { readFileSync, globSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import {
+  readFileSync,
+  globSync,
+  writeFileSync,
+  renameSync,
+  lstatSync,
+  realpathSync,
+} from "node:fs";
+import { join, relative, resolve, isAbsolute, dirname, sep } from "node:path";
 import {
   LONG_RUN_RE,
   STRIP,
@@ -103,20 +110,75 @@ export function scanText(content) {
 }
 
 /**
+ * True when `realChild` is `realRoot` itself or lives beneath it. Both inputs
+ * must already be realpath-resolved absolute paths. Containment is tested with
+ * `relative(root, child)`: the result is "" when they are the same path, and
+ * for a true descendant it is a forward path with no `..` segment and is not
+ * itself absolute — so a sibling like `/proj-evil` (relative => `../proj-evil`)
+ * is correctly rejected.
+ * @param {string} realRoot
+ * @param {string} realChild
+ * @returns {boolean}
+ */
+function isContained(realRoot, realChild) {
+  const rel = relative(realRoot, realChild);
+  return (
+    rel === "" ||
+    (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))
+  );
+}
+
+/**
+ * Resolve `absPath` to a real (symlink-followed) absolute path and assert it is
+ * contained within `realRoot`; THROW naming the offending path/pattern when it
+ * escapes. A scanner pointed outside its own tree is a misconfiguration the
+ * caller must see — failing loud beats silently skipping a file the caller
+ * believes was scanned. `pattern` is included in the message for diagnosis.
+ * @param {string} absPath  absolute path to a glob match (already exists)
+ * @param {string} realRoot  realpath of the scan root
+ * @param {string} pattern  the glob that produced this match
+ * @returns {void}
+ */
+function assertContained(absPath, realRoot, pattern) {
+  const real = realpathSync(absPath);
+  if (isContained(realRoot, real)) return;
+  throw new Error(
+    `instruction-file path escapes scan root: pattern ${JSON.stringify(
+      pattern,
+    )} matched ${JSON.stringify(absPath)} which resolves to ${JSON.stringify(
+      real,
+    )} outside ${JSON.stringify(realRoot)}`,
+  );
+}
+
+/**
  * Expand `globs` (relative to `cwd`) to absolute file paths, skipping
  * `node_modules`. The glob set is the caller's instruction-file convention.
+ *
+ * Containment is enforced: every match is resolved to its real (symlink-
+ * followed) path and must live within `cwd`'s realpath. A match that escapes
+ * the root — via `..`, an absolute-path glob, or a symlink pointing outside —
+ * THROWS rather than being scanned or silently dropped, since reaching outside
+ * the tree is a caller misconfiguration that must surface loudly.
  * @param {string[]} globs
  * @param {{ cwd?: string }} [options]
  * @returns {string[]}
  */
 export function findInstructionFiles(globs, { cwd = process.cwd() } = {}) {
+  const realRoot = realpathSync(resolve(cwd));
   const seen = new Set();
   for (const pattern of globs)
     for (const name of globSync(pattern, {
       cwd,
       exclude: (entry) => entry === "node_modules",
-    }))
-      seen.add(join(cwd, name));
+    })) {
+      // globSync returns absolute paths verbatim for an absolute pattern and
+      // cwd-relative names otherwise; joining an already-absolute name would
+      // double the prefix into a nonexistent path (the absolute-glob miss bug).
+      const absPath = isAbsolute(name) ? name : join(cwd, name);
+      assertContained(absPath, realRoot, pattern);
+      seen.add(absPath);
+    }
   return [...seen];
 }
 
@@ -145,16 +207,57 @@ export function scanInstructionFiles(globs, { cwd = process.cwd() } = {}) {
 
 /**
  * Strip payload-capable invisible characters from `absPath` in place. Returns
- * true when the file changed (it held a payload), false when it was already
- * clean. Throws if the file cannot be read or written (the caller decides
- * whether an unwritable contaminated file is fatal or falls back to alerting).
+ * true when the file changed (it held a payload {@link scanText} flags), false
+ * when {@link scanText} reports nothing.
+ *
+ * Contract (scan/clean coherence): clean strips exactly what scan flags. A
+ * write happens ONLY when `scanText` reports a finding, so the "scan, then
+ * clean what scan flagged" workflow never silently rewrites a file scan called
+ * clean. A handful of sub-threshold invisible chars (which scan ignores) are
+ * left untouched — by design, the scanner's definition of a payload is the
+ * single source of truth for what gets removed.
+ *
+ * Refuses to follow symlinks: instruction files must be regular files, so a
+ * symlinked path (which could redirect the write to a target outside the tree)
+ * THROWS rather than being written through.
+ *
+ * The write is atomic: stripped content goes to a temp file in the same
+ * directory which is then `rename`d over the original (preserving the original
+ * file mode), so a crash mid-write cannot leave a truncated instruction file.
+ *
+ * Throws if the file cannot be read or written (the caller decides whether an
+ * unwritable contaminated file is fatal or falls back to alerting).
  * @param {string} absPath
  * @returns {boolean}
  */
 export function cleanFile(absPath) {
+  const info = lstatSync(absPath);
+  if (info.isSymbolicLink())
+    throw new Error(
+      `refusing to clean through a symlink (instruction files must be regular files): ${JSON.stringify(
+        absPath,
+      )}`,
+    );
+
   const original = readFileSync(absPath, "utf-8");
+  // Scan is the SSOT for what counts as a payload: don't rewrite a file scan
+  // would not flag, even if stripInvisible would technically remove a char.
+  // A scan finding (a >=LONG_RUN_THRESHOLD run, or >=SCATTERED_THRESHOLD
+  // scattered chars) is past the carve-out's preserve window, so stripInvisible
+  // always removes at least one char here — stripped !== original is guaranteed.
+  if (scanText(original).length === 0) return false;
+
   const stripped = stripInvisible(original);
-  if (stripped === original) return false;
-  writeFileSync(absPath, stripped);
+  // info is the lstat above; since the path is confirmed not a symlink, its
+  // mode is the regular file's mode.
+  const mode = info.mode;
+  // Atomic replace: write to a sibling temp (same dir => same filesystem, so
+  // rename is atomic, not a cross-device copy) then rename over the original.
+  // A crash before the rename leaves the original intact; after it, the new
+  // content is fully present. Mode is carried onto the temp so the replacement
+  // keeps the original's permissions. rename errors propagate (fail loud).
+  const tmp = join(dirname(absPath), `.${Date.now()}-${process.pid}.tmp`);
+  writeFileSync(tmp, stripped, { mode });
+  renameSync(tmp, absPath);
   return true;
 }
