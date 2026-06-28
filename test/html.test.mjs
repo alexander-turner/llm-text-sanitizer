@@ -734,8 +734,9 @@ describe("splice fidelity and regressions", () => {
 // importantly, prove ordinary prose stays BYTE-FOR-BYTE untouched — the
 // false-positive risk a hand-rolled bogus-comment scanner would carry.
 describe("bogus-comment parity in the prose branch", () => {
-  // A `<!` form alone passes the HTML_TAG_PRESENT gate; a `<?` form alone does
-  // not, so it is paired with a `<!` to exercise the `<?` arm of the scan.
+  // `<!`, `<?`, and `<![CDATA[` forms each clear the HTML_TAG_PRESENT gate on
+  // their own (the `<?` arm was added so a PI-only document still reaches the
+  // splice); sanitizeHtml then assigns each the span the tokenizer hides.
   const SPLICED = [
     {
       name: "bogus <!declaration>",
@@ -748,9 +749,14 @@ describe("bogus-comment parity in the prose branch", () => {
       want: `note ${COMMENT_PLACEHOLDER} end`,
     },
     {
-      name: "processing instruction (paired with a <! to clear the gate)",
+      name: "processing instruction beside a bogus declaration",
       input: "x <!a> and <?php evil ?> y",
       want: `x ${COMMENT_PLACEHOLDER} and ${COMMENT_PLACEHOLDER} y`,
+    },
+    {
+      name: "PI-only document (cleared by the <? gate arm)",
+      input: "before <?php evil ?> after",
+      want: `before ${COMMENT_PLACEHOLDER} after`,
     },
     {
       name: "a proper comment beside a bogus one",

@@ -13,10 +13,13 @@
 
 /**
  * Matches any HTML tag-like construct: opening tags, closing tags (`</`),
- * comments (`<!`), and fragments with attributes. Gate for Layer 2 (HTML
- * sanitization) and the HTML img/a exfil path in Layer 3.
+ * comments and bogus declarations (`<!`), and processing instructions / bogus
+ * comments (`<?…?>`, which the HTML tokenizer hides exactly like a comment).
+ * The `<?` arm is what lets a PI-only document reach Layer 2's bogus-comment
+ * splice; without it such a document would skip the pipeline entirely. Gate for
+ * Layer 2 (HTML sanitization) and the HTML img/a exfil path in Layer 3.
  */
-export const HTML_TAG_PRESENT = /<[a-zA-Z/!][^<>]*>/;
+export const HTML_TAG_PRESENT = /<[a-zA-Z/!?][^<>]*>/;
 
 /**
  * Matches markdown link/image syntax (`](`, `![`) and reference link

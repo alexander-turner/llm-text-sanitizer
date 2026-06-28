@@ -34,8 +34,12 @@ describe("needsMarkdownPipeline", () => {
     assert.equal(needsMarkdownPipeline("a <b>x</b> c"), true));
   it("is true for a markdown link hint", () =>
     assert.equal(needsMarkdownPipeline("see [x](https://e.com)"), true));
+  it("is true for a processing instruction / bogus comment (PI-only doc)", () =>
+    assert.equal(needsMarkdownPipeline("before <?php evil ?> after"), true));
   it("is false for plain prose with no tag or link", () =>
     assert.equal(needsMarkdownPipeline("plain prose, nothing here"), false));
+  it("stays false for bare comparison operators (precision)", () =>
+    assert.equal(needsMarkdownPipeline("a < b and c > d, x<3"), false));
 });
 
 // ─── describeRemoved ─────────────────────────────────────────────────────────
