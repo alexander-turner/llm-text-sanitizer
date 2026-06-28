@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import fc from "fast-check";
 
 import { classifyPrompt } from "../src/prompt.mjs";
+import { stripAnsiFully } from "../src/layer1.mjs";
 import { SCATTERED_THRESHOLD } from "../src/invisible.mjs";
 import { fcRunOptions, cp } from "./test-helpers.mjs";
 
@@ -100,6 +101,74 @@ describe("classifyPrompt (property): clean text below threshold passes", () => {
           action: "pass",
         });
       },
+    );
+  });
+});
+
+// The C1-bypass class: classifyPrompt must never be WEAKER than the sanitizer's
+// own ANSI detection. If stripAnsiFully removes anything from `s` (i.e. `s`
+// holds a real ANSI control sequence the Layer-1 strip would scrub from the
+// model's view), the prompt verdict must surface it (note | block), never pass.
+// Pinning the invariant against the sanitizer — not a hard-coded codepoint —
+// catches ANY future ANSI-introducer blind spot (the 8-bit C1 CSI/OSC bug this
+// branch fixes, and the next one) without naming the byte in advance.
+describe("classifyPrompt (property): never weaker than the sanitizer's ANSI detection", () => {
+  // Alphabet spanning every ANSI introducer plus the bytes a real sequence
+  // needs to COMPLETE: ESC (U+001B), C1 CSI (U+009B), C1 OSC (U+009D), BEL
+  // (U+0007, an OSC terminator), ST as ESC + '\\', and the param/final-byte
+  // vocabulary. SGR final 'm', cursor final 'A', erase final 'J', and digits/
+  // ';' let the generator emit SGR-only, non-SGR CSI, and OSC sequences as well
+  // as plain text (the letters/digits that stand alone are ANSI-free input).
+  const ESC = cp(0x1b);
+  const ansiToken = fc.constantFrom(
+    ESC,
+    cp(0x9b), // C1 CSI
+    cp(0x9d), // C1 OSC
+    cp(0x07), // BEL (OSC terminator)
+    `${ESC}\\`, // ST (ESC + backslash)
+    "[", // CSI opener after a 7-bit ESC
+    "]", // OSC opener after a 7-bit ESC
+    "m", // SGR final byte
+    "A", // cursor-move final byte
+    "J", // erase final byte
+    "2",
+    "0",
+    "1",
+    ";",
+    "a",
+    "b",
+    "Z",
+    "x",
+  );
+  const ansiFuzzText = fc
+    .array(ansiToken, { maxLength: 60 })
+    .map((parts) => parts.join(""));
+
+  it("stripAnsiFully(s) !== s implies classifyPrompt(s).action is not 'pass'", () => {
+    check(ansiFuzzText, (s) => {
+      if (stripAnsiFully(s) !== s) {
+        assert.notStrictEqual(
+          classifyPrompt(s).action,
+          "pass",
+          `sanitizer strips ANSI from ${JSON.stringify(s)} but classifyPrompt passed it`,
+        );
+      }
+    });
+  });
+
+  // Non-vacuity: the precondition (sanitizer actually strips ANSI) must fire on
+  // a meaningful fraction of generated samples, else the implication above holds
+  // trivially. Sample the same generator and assert a real hit rate.
+  it("precondition fires on a meaningful fraction of generated inputs (non-vacuity)", () => {
+    const SAMPLES = 5000;
+    const samples = fc.sample(ansiFuzzText, SAMPLES);
+    const fires = samples.filter((s) => stripAnsiFully(s) !== s).length;
+    const fraction = fires / SAMPLES;
+    // Sanity floor far below the empirically observed rate; the point is that
+    // the antecedent is exercised on many runs, not that it dominates.
+    assert.ok(
+      fraction > 0.1,
+      `precondition fired on only ${fires}/${SAMPLES} (${(fraction * 100).toFixed(1)}%) — property risks vacuity`,
     );
   });
 });
