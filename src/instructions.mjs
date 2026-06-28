@@ -21,6 +21,7 @@ import {
   lstatSync,
   realpathSync,
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join, relative, resolve, isAbsolute, dirname, sep } from "node:path";
 import {
   LONG_RUN_RE,
@@ -46,16 +47,25 @@ export function decodeRun(run) {
     .map((cp) => String.fromCharCode(cp - 0xe0000))
     .join("");
 
-  if (tagAscii.length > 0) {
-    return { method: "Unicode tag characters → ASCII", decoded: tagAscii };
-  }
-
   // Zero-width binary encoding: ZWSP=0, ZWNJ=1, ZWJ=group separator.
   const ZW_BIT = new Map([
     [0x200b, "0"],
     [0x200c, "1"],
     [0x200d, "|"],
   ]);
+
+  if (tagAscii.length > 0) {
+    // A run can carry BOTH tag-ASCII and zero-width chars; the strip removes the
+    // whole run regardless, but the operator-facing `decoded` must reflect the
+    // zero-width portion too rather than silently dropping it.
+    const zwCount = cps.filter((cp) => ZW_BIT.has(cp)).length;
+    const note = zwCount > 0 ? ` + ${zwCount} zero-width char(s)` : "";
+    return {
+      method: "Unicode tag characters → ASCII",
+      decoded: `${tagAscii}${note}`,
+    };
+  }
+
   if (cps.every((cp) => ZW_BIT.has(cp))) {
     const bits = cps.map((cp) => ZW_BIT.get(cp)).join("");
     return {
@@ -221,6 +231,34 @@ export function scanInstructionFiles(globs, { cwd = process.cwd() } = {}) {
 }
 
 /**
+ * Atomically replace `absPath`'s contents with `data`, preserving `mode`.
+ *
+ * Writes to a sibling temp in the same directory, then `rename`s it over the
+ * original (same dir => same filesystem => the rename is atomic, not a
+ * cross-device copy). The temp name is UNPREDICTABLE (`tmpName()` defaults to
+ * crypto-random) and the temp is created with the exclusive flag "wx"
+ * (O_CREAT|O_EXCL): if the path already exists — including an attacker-planted
+ * symlink at a guessable temp name — the open fails (EEXIST) and does NOT follow
+ * the link to clobber its target. On the rare collision we fail loud rather than
+ * retry into a different attacker-controlled path. `tmpName` is injectable for
+ * tests to force a known temp path; production callers never pass it.
+ * @param {string} absPath
+ * @param {string} data
+ * @param {number} mode
+ * @param {() => string} [tmpName]
+ */
+export function atomicReplaceFile(
+  absPath,
+  data,
+  mode,
+  tmpName = () => `.${randomBytes(12).toString("hex")}.tmp`,
+) {
+  const tmp = join(dirname(absPath), tmpName());
+  writeFileSync(tmp, data, { mode, flag: "wx" });
+  renameSync(tmp, absPath);
+}
+
+/**
  * Strip payload-capable invisible characters from `absPath` in place. Returns
  * true when the file changed (it held a payload {@link scanText} flags), false
  * when {@link scanText} reports nothing.
@@ -236,9 +274,10 @@ export function scanInstructionFiles(globs, { cwd = process.cwd() } = {}) {
  * symlinked path (which could redirect the write to a target outside the tree)
  * THROWS rather than being written through.
  *
- * The write is atomic: stripped content goes to a temp file in the same
- * directory which is then `rename`d over the original (preserving the original
- * file mode), so a crash mid-write cannot leave a truncated instruction file.
+ * The write is atomic (see {@link atomicReplaceFile}): stripped content goes to
+ * a temp file in the same directory which is then `rename`d over the original
+ * (preserving the original file mode), so a crash mid-write cannot leave a
+ * truncated instruction file.
  *
  * Throws if the file cannot be read or written (the caller decides whether an
  * unwritable contaminated file is fatal or falls back to alerting).
@@ -264,15 +303,9 @@ export function cleanFile(absPath) {
 
   const stripped = stripInvisible(original);
   // info is the lstat above; since the path is confirmed not a symlink, its
-  // mode is the regular file's mode.
-  const mode = info.mode;
-  // Atomic replace: write to a sibling temp (same dir => same filesystem, so
-  // rename is atomic, not a cross-device copy) then rename over the original.
-  // A crash before the rename leaves the original intact; after it, the new
-  // content is fully present. Mode is carried onto the temp so the replacement
-  // keeps the original's permissions. rename errors propagate (fail loud).
-  const tmp = join(dirname(absPath), `.${Date.now()}-${process.pid}.tmp`);
-  writeFileSync(tmp, stripped, { mode });
-  renameSync(tmp, absPath);
+  // mode is the regular file's mode. A crash before the rename inside
+  // atomicReplaceFile leaves the original intact; after it the new content is
+  // fully present. rename/EEXIST errors propagate (fail loud).
+  atomicReplaceFile(absPath, stripped, info.mode);
   return true;
 }
