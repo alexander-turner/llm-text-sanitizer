@@ -10,7 +10,8 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { Buffer } from "node:buffer";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +22,7 @@ import { sanitize } from "../src/index.mjs";
 import { classifyPrompt } from "../src/prompt.mjs";
 import { sanitizeText } from "../src/output.mjs";
 import { scanInstructionFiles } from "../src/instructions.mjs";
+import { createLineSplitter } from "../bin/sanitize-cli.mjs";
 import { fcRunOptions } from "./test-helpers.mjs";
 
 const ESC = "\u001b";
@@ -378,5 +380,276 @@ describe("CLI: unknown op fails loudly", () => {
       found: [],
       warnings: [],
     });
+  });
+});
+
+// ─── Worker per-line memory cap (streaming) ─────────────────────────
+//
+// The header docstring promises the worker rejects an oversized request "rather
+// than buffering an unbounded payload into memory." A `readline`-based loop
+// can't honor that: it buffers a whole newline-less line before the size check
+// runs. These tests pin the streaming behavior — an oversize line is discarded
+// AS IT STREAMS (peak buffering bounded by the cap), the worker emits one error
+// line for it, and the framing resyncs so the NEXT request still answers.
+
+/**
+ * Drive the worker by streaming raw chunks on stdin, collecting response lines.
+ * @param {Buffer[]} chunks   written in order, then stdin is closed
+ * @param {number} capBytes   AGENT_SANITIZER_MAX_INPUT_BYTES for the child
+ * @returns {Promise<{ lines: string[], peakRssBytes: number }>}
+ */
+const runWorkerStreaming = (chunks, capBytes) =>
+  new Promise((resolve, reject) => {
+    const child = spawn("node", [CLI, "--worker"], {
+      env: {
+        ...process.env,
+        AGENT_SANITIZER_MAX_INPUT_BYTES: String(capBytes),
+      },
+    });
+    let out = "";
+    let peakRssBytes = 0;
+    child.stdout.on("data", (d) => (out += d));
+    child.on("error", reject);
+    // Sample the child's resident set so the test can assert the oversize line
+    // never made it into memory whole. /proc is Linux-only; elsewhere the RSS
+    // assertion is skipped and only the functional framing checks run.
+    const sample = () => {
+      try {
+        const statm = readFileSync(`/proc/${child.pid}/statm`, "utf8");
+        peakRssBytes = Math.max(
+          peakRssBytes,
+          Number(statm.split(" ")[1]) * 4096,
+        );
+      } catch {
+        // child gone or non-Linux /proc absent — nothing to sample
+      }
+    };
+    const sampler = setInterval(sample, 5);
+    child.on("close", () => {
+      clearInterval(sampler);
+      resolve({
+        lines: out.length === 0 ? [] : out.trim().split("\n"),
+        peakRssBytes,
+      });
+    });
+
+    (async () => {
+      for (const chunk of chunks) {
+        if (!child.stdin.write(chunk))
+          await new Promise((r) => child.stdin.once("drain", r));
+      }
+      child.stdin.end();
+    })().catch(reject);
+  });
+
+describe("CLI: worker bounds per-line buffering to the input cap", () => {
+  it("discards an oversized no-newline line, errors once, and resyncs", async () => {
+    const cap = 1024;
+    const okBefore = Buffer.from(`${JSON.stringify({ text: "a" })}\n`);
+    // A single line FAR larger than Node's interpreter baseline, NO interior
+    // newline, streamed in 1 MiB chunks: a buffering implementation must hold the
+    // whole payload before the cap fires, so its peak RSS rises by ~payloadBytes.
+    // The bound code discards each chunk past the cap, so RSS stays near baseline.
+    const payloadBytes = 256 * 1024 * 1024;
+    const chunkSize = 1024 * 1024;
+    const bigChunk = Buffer.from("X".repeat(chunkSize));
+    const bigChunks = Array.from(
+      { length: payloadBytes / chunkSize },
+      () => bigChunk,
+    );
+    const okAfter = Buffer.from(`\n${JSON.stringify({ text: "b" })}\n`);
+
+    // Baseline: peak RSS of a worker that only handles two tiny requests. The
+    // streaming run's peak must not exceed this by anything close to payloadBytes.
+    const baseline = await runWorkerStreaming(
+      [okBefore, Buffer.from(`${JSON.stringify({ text: "b" })}\n`)],
+      cap,
+    );
+    const { lines, peakRssBytes } = await runWorkerStreaming(
+      [okBefore, ...bigChunks, okAfter],
+      cap,
+    );
+
+    // Exactly one response per input line, framing intact across the discard.
+    assert.equal(lines.length, 3);
+    assert.deepEqual(JSON.parse(lines[0]), {
+      cleaned: "a",
+      found: [],
+      warnings: [],
+    });
+    assert.match(JSON.parse(lines[1]).error, /request too large/);
+    assert.match(JSON.parse(lines[1]).error, /AGENT_SANITIZER_MAX_INPUT_BYTES/);
+    // The resync proof: the request AFTER the discarded line still answers.
+    assert.deepEqual(JSON.parse(lines[2]), {
+      cleaned: "b",
+      found: [],
+      warnings: [],
+    });
+
+    // Memory proof: peak RSS over baseline must stay a small fraction of the
+    // 256 MiB payload. A buffering impl would add ~payloadBytes here; the bound
+    // adds only the cap plus transient chunk/GC slack. The 1/4-payload ceiling
+    // sits far below a buffering peak yet comfortably above GC headroom, so the
+    // assertion separates the two implementations without flaking. /proc-less
+    // hosts report 0 for both; skip the bound only then.
+    if (peakRssBytes > 0 && baseline.peakRssBytes > 0)
+      assert.ok(
+        peakRssBytes - baseline.peakRssBytes < payloadBytes / 4,
+        `peak RSS grew by ${peakRssBytes - baseline.peakRssBytes} bytes over ` +
+          `baseline ${baseline.peakRssBytes}; a bounded worker stays well under ` +
+          `${payloadBytes / 4} for a ${payloadBytes}-byte streamed line`,
+      );
+  });
+
+  it("a line exactly at the cap succeeds; one byte over errors", async () => {
+    // The request is `{"text":"<pad>"}`; size the pad so the whole line lands
+    // exactly on / one past the cap, pinning the boundary.
+    const make = (capExact) => {
+      const envelopeBytes = Buffer.byteLength('{"text":""}');
+      const text = "a".repeat(capExact - envelopeBytes);
+      return JSON.stringify({ text });
+    };
+    const cap = 256;
+    const atCap = make(cap);
+    assert.equal(Buffer.byteLength(atCap), cap);
+    const overCap = make(cap + 1);
+    assert.equal(Buffer.byteLength(overCap), cap + 1);
+
+    const input = Buffer.from(`${atCap}\n${overCap}\n`);
+    const { lines } = await runWorkerStreaming([input], cap);
+    assert.equal(lines.length, 2);
+    assert.ok(!("error" in JSON.parse(lines[0])), "at-cap line should succeed");
+    assert.match(JSON.parse(lines[1]).error, /request too large/);
+  });
+});
+
+// ─── Splitter unit + property tests ────────────────────────────────────
+//
+// `createLineSplitter` is the pure heart of the fix — it decides, byte by byte,
+// which line is in-cap (a `line` event) and which overflowed (an `oversize`
+// event), independent of how stdin chunks the bytes. Unit-test it directly so a
+// member-drop (CRLF handling, the at-cap boundary, mid-chunk overflow, the EOF
+// flush) is caught without spawning a process.
+
+/** Feed `input` to a fresh splitter as the given `chunkSize` (or all at once),
+ * returning every event including the EOF flush. */
+const splitAll = (input, cap, chunkSize) => {
+  const split = createLineSplitter(cap);
+  const buf = Buffer.from(input, "utf8");
+  const events = [];
+  if (chunkSize === undefined) events.push(...split(buf));
+  else
+    for (let i = 0; i < buf.length; i += chunkSize)
+      events.push(...split(buf.subarray(i, i + chunkSize)));
+  events.push(...split.end());
+  return events;
+};
+
+describe("createLineSplitter", () => {
+  it("emits one in-cap line per newline, text decoded", () => {
+    assert.deepEqual(splitAll("hi\nthere\n", 100), [
+      { kind: "line", text: "hi" },
+      { kind: "line", text: "there" },
+    ]);
+  });
+
+  it("strips a trailing CR (CRLF frames like LF)", () => {
+    assert.deepEqual(splitAll("a\r\nb\r\n", 100), [
+      { kind: "line", text: "a" },
+      { kind: "line", text: "b" },
+    ]);
+  });
+
+  it("emits a blank line for an empty input line (no skip)", () => {
+    assert.deepEqual(splitAll("\n \n", 100), [
+      { kind: "line", text: "" },
+      { kind: "line", text: " " },
+    ]);
+  });
+
+  it("flushes an unterminated final line at EOF", () => {
+    assert.deepEqual(splitAll("done", 100), [{ kind: "line", text: "done" }]);
+    assert.deepEqual(splitAll("", 100), []);
+    assert.deepEqual(splitAll("x\n", 100), [{ kind: "line", text: "x" }]);
+  });
+
+  it("a line exactly at the cap is in-cap; one over is oversize", () => {
+    assert.deepEqual(splitAll("AAAA\n", 4), [{ kind: "line", text: "AAAA" }]);
+    assert.deepEqual(splitAll("AAAAA\n", 4), [{ kind: "oversize" }]);
+  });
+
+  it("discards an oversize line then resyncs on the next", () => {
+    assert.deepEqual(splitAll("AAAAAAAA\nok\n", 4), [
+      { kind: "oversize" },
+      { kind: "line", text: "ok" },
+    ]);
+  });
+
+  it("flushes an unterminated oversize tail as one oversize event", () => {
+    assert.deepEqual(splitAll("AAAAAAAA", 4), [{ kind: "oversize" }]);
+  });
+
+  it("detects overflow mid-chunk, not only at the trailing edge", () => {
+    // Whole input in ONE chunk: the oversize MIDDLE line must still be caught
+    // (the bug the fix targets — size-checking only the chunk's tail misses it).
+    assert.deepEqual(splitAll("a\nBBBBBBBB\nc\n", 4), [
+      { kind: "line", text: "a" },
+      { kind: "oversize" },
+      { kind: "line", text: "c" },
+    ]);
+  });
+
+  it("classification is identical however the bytes are chunked", () => {
+    // The same logical lines fed as one chunk vs. byte-by-byte vs. odd splits
+    // must yield the SAME event sequence — chunk boundaries are not request
+    // boundaries. (Decoded text can differ when a split lands mid-UTF-8 char, so
+    // compare the kind/oversize structure, which is what framing depends on.)
+    const cap = 8;
+    const input = "ok\nWAYTOOLONGLINE\n\nfin";
+    const kinds = (cs) =>
+      splitAll(input, cap, cs).map((e) =>
+        e.kind === "oversize" ? "oversize" : "line",
+      );
+    const oneShot = kinds(undefined);
+    assert.deepEqual(oneShot, ["line", "oversize", "line", "line"]);
+    for (const cs of [1, 2, 3, 5, 7, 13]) assert.deepEqual(kinds(cs), oneShot);
+  });
+
+  it("property: # line events == # in-cap lines; framing chunk-invariant", () => {
+    // Domain: random lines (some > cap), joined by \\n, fed at random chunk
+    // sizes. INVARIANTS: (1) total events == number of input lines (one response
+    // per line, no skips/dupes); (2) a line's event kind matches whether its
+    // BYTE length is within the cap; (3) the event SEQUENCE is invariant to how
+    // the byte stream is chunked. Never throws on any input.
+    const cap = 16;
+    fc.assert(
+      fc.property(
+        fc.array(fc.string({ maxLength: 40 }), { minLength: 1, maxLength: 12 }),
+        fc.integer({ min: 1, max: 20 }),
+        (rawLines, chunkSize) => {
+          // A line can't contain its own delimiter; \\r is stripped, so exclude
+          // both to keep the expected framing unambiguous. Terminate EVERY line
+          // with \\n (trailing newline included) so each modeled line is framed —
+          // an unterminated empty tail is genuinely zero lines, not one, which
+          // would desync the count.
+          const lines = rawLines.map((l) => l.replace(/[\n\r]/g, ""));
+          const input = `${lines.join("\n")}\n`;
+          const expected = lines.map((l) =>
+            Buffer.byteLength(l, "utf8") > cap ? "oversize" : "line",
+          );
+
+          const kindsAt = (cs) =>
+            splitAll(input, cap, cs).map((e) =>
+              e.kind === "oversize" ? "oversize" : "line",
+            );
+          const got = kindsAt(chunkSize);
+          assert.equal(got.length, lines.length);
+          assert.deepEqual(got, expected);
+          // Chunk-invariance: same sequence fed all-at-once.
+          assert.deepEqual(kindsAt(undefined), expected);
+        },
+      ),
+      fcRunOptions({ numRuns: 200 }),
+    );
   });
 });

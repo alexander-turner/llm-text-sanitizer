@@ -45,7 +45,7 @@
  */
 import { Buffer } from "node:buffer";
 import process from "node:process";
-import readline from "node:readline";
+import { pathToFileURL } from "node:url";
 
 import { sanitize } from "../src/index.mjs";
 
@@ -173,31 +173,137 @@ async function readAll(stream) {
   return text;
 }
 
-async function runWorker() {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    crlfDelay: Infinity,
+/**
+ * Streaming newline-splitter that never buffers a line past the byte `limit`.
+ *
+ * Fed raw stdin chunks one at a time, it yields a sequence of events the worker
+ * turns into exactly one response line each. The reason this exists instead of
+ * `readline`: `readline` buffers an entire newline-less line into memory before
+ * handing it over, so a hostile caller streaming a multi-gigabyte line with no
+ * `\n` defeats the size cap (the cap only fires once the whole line is already
+ * resident). Here the running byte length of the CURRENT unterminated line is
+ * tracked as bytes arrive; the instant it exceeds `limit` the partial buffer is
+ * dropped and the splitter enters a "resync" state that discards every byte up
+ * to (and including) the next `\n`, so peak buffering for one line is bounded by
+ * `limit` plus one chunk — never the whole line.
+ *
+ * Events: `{ kind: "line", text }` for a complete in-cap line (trailing `\r`
+ * stripped, matching `readline`'s `crlfDelay: Infinity` CRLF handling), and
+ * `{ kind: "oversize" }` for a line whose bytes crossed `limit` (emitted once,
+ * at the newline that terminates the discarded line). The worker maps the
+ * former through `handle` and the latter to a "request too large" error line, so
+ * the one-response-per-input-line framing holds even for a dropped line.
+ *
+ * @param {number} limit  per-line byte cap (`maxInputBytes()`)
+ */
+function createLineSplitter(limit) {
+  // `buffer` holds the bytes of the current line while it's still under the cap.
+  // The moment appending the next segment would push its byte length over
+  // `limit`, `buffer` is freed and `discarding` flips: from there we scan only
+  // for the terminating `\n`, never re-accumulating, so peak buffering for one
+  // line is bounded by `limit` regardless of how long the line runs.
+  let buffer = Buffer.alloc(0);
+  let discarding = false;
+
+  /** Strip one trailing `\r` so CRLF input frames identically to LF. */
+  const toLine = (buf) => {
+    const stripCr = buf.length > 0 && buf[buf.length - 1] === 0x0d;
+    return buf.toString("utf8", 0, stripCr ? buf.length - 1 : buf.length);
+  };
+
+  // Fold one segment (the bytes of the current line seen so far in this chunk)
+  // into `buffer`, flipping to `discarding` if it would breach the cap. Applies
+  // identically to a newline-terminated segment and to the unterminated tail, so
+  // an oversize line is caught WITHIN a chunk, not only at its trailing edge.
+  const accumulate = (segment) => {
+    if (discarding) return;
+    if (buffer.length + segment.length > limit) {
+      buffer = Buffer.alloc(0);
+      discarding = true;
+      return;
+    }
+    if (segment.length > 0) buffer = Buffer.concat([buffer, segment]);
+  };
+
+  /** Feed one chunk, returning the events it completes (newline-terminated). */
+  const push = (chunk) => {
+    const events = [];
+    let start = 0;
+    for (let i = 0; i < chunk.length; i++) {
+      if (chunk[i] !== 0x0a) continue;
+      accumulate(chunk.subarray(start, i));
+      if (discarding) {
+        events.push({ kind: "oversize" });
+        discarding = false;
+      } else {
+        events.push({ kind: "line", text: toLine(buffer) });
+      }
+      buffer = Buffer.alloc(0);
+      start = i + 1;
+    }
+    accumulate(chunk.subarray(start));
+    return events;
+  };
+
+  /**
+   * Flush at EOF. A final line with no trailing `\n` is still a request, so it
+   * gets a response — matching `readline`, which emits its last line on `close`.
+   * An empty tail (stream ended on a `\n`, or was empty) yields nothing.
+   */
+  push.end = () => {
+    if (discarding) {
+      discarding = false;
+      return [{ kind: "oversize" }];
+    }
+    if (buffer.length === 0) return [];
+    const event = { kind: "line", text: toLine(buffer) };
+    buffer = Buffer.alloc(0);
+    return [event];
+  };
+
+  return push;
+}
+
+const OVERSIZE_ERROR = (limit) =>
+  JSON.stringify({
+    error:
+      `request too large: input exceeds the ${limit}-byte limit ` +
+      "(raise AGENT_SANITIZER_MAX_INPUT_BYTES to accept it)",
   });
-  // `for await` drives lines sequentially, awaiting each `handle`, so responses
-  // leave in request order. The try/catch is the worker's whole reason to
-  // exist: a single malformed request reports an error and the loop continues
-  // rather than tearing down a pipe other requests are still using.
-  //
-  // EXACTLY one response line per input line — including a blank/whitespace line
-  // (`handle` lets `JSON.parse` reject it into an `{ error }` line). Skipping it
-  // would emit zero responses for one input line and desync a client that reads
-  // one response per request. `response` never contains a newline: `handle`
-  // returns single-line `JSON.stringify` output, and the error branch
-  // stringifies a one-key object, so the one-line-per-request framing holds.
-  for await (const line of rl) {
+
+async function runWorker() {
+  // Stream raw bytes (no encoding) so the splitter tracks UTF-8 byte length, not
+  // decoded characters, and a multi-gigabyte newline-less line is discarded as
+  // it streams rather than buffered whole the way `readline` would.
+  const limit = maxInputBytes();
+  const split = createLineSplitter(limit);
+
+  // EXACTLY one response line per input line. A complete in-cap line goes
+  // through `handle`; its try/catch is the worker's reason to exist — a single
+  // malformed request reports an error and serving continues rather than
+  // tearing down a pipe other requests still use. An oversize line (its bytes
+  // crossed the cap, so it was discarded unbuffered) gets the same structured
+  // "request too large" error a one-shot caller sees. `response` never holds a
+  // newline: `JSON.stringify` of the result or of a one-key error object is
+  // single-line, so the one-line-per-request framing holds.
+  const respond = async (event) => {
+    if (event.kind === "oversize") {
+      process.stdout.write(`${OVERSIZE_ERROR(limit)}\n`);
+      return;
+    }
     let response;
     try {
-      response = await handle(line);
+      response = await handle(event.text);
     } catch (err) {
       response = JSON.stringify({ error: err?.message ?? String(err) });
     }
     process.stdout.write(`${response}\n`);
+  };
+
+  for await (const chunk of process.stdin) {
+    for (const event of split(Buffer.from(chunk))) await respond(event);
   }
+  for (const event of split.end()) await respond(event);
 }
 
 async function runOneShot() {
@@ -217,4 +323,12 @@ async function runOneShot() {
   process.stdout.write(`${response}\n`);
 }
 
-await (process.argv.includes("--worker") ? runWorker() : runOneShot());
+// Run only when invoked as a script, not when imported (a unit test imports
+// `createLineSplitter` directly and must not have the worker consume its stdin).
+const invokedAsScript =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedAsScript)
+  await (process.argv.includes("--worker") ? runWorker() : runOneShot());
+
+export { createLineSplitter };
