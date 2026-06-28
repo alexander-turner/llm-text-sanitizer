@@ -364,7 +364,7 @@ const mdParser = unified().use(remarkParse).use(remarkGfm);
  * @param {Array<{start: number, end: number, kind: "comment" | "hidden"}>} ranges
  */
 function collectCommentRanges(value, base, nodeEnd, ranges) {
-  for (let searchFrom = 0; ; ) {
+  for (let searchFrom = 0; ;) {
     const open = value.indexOf("<!--", searchFrom);
     if (open === -1) break;
     const close = value.indexOf("-->", open + 2);
