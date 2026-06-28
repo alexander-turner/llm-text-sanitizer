@@ -9,6 +9,11 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    # Wait this many days after a release before proposing it, so a freshly
+    # compromised just-published version isn't pulled in immediately (zizmor
+    # dependabot-cooldown).
+    cooldown:
+      default-days: 7
 
   # Pinned GitHub Actions SHAs across .github/workflows and .github/actions.
   - package-ecosystem: "github-actions"
@@ -17,6 +22,8 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "ci"
+    cooldown:
+      default-days: 7
 
   # Python dev dependencies declared in pyproject.toml (pytest, etc.).
   - package-ecosystem: "pip"
@@ -26,3 +33,5 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    cooldown:
+      default-days: 7
