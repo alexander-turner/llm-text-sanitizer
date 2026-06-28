@@ -243,16 +243,26 @@ fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
 '
 log "Set package.json to $NEW_VERSION (working directory only)"
 
-# Build and publish to npm
-# Handle "already published" (exit code 1, HTTP 400/409) as success — can happen
-# when npm registry caching causes the earlier safety check to miss an existing version
-if ! PUBLISH_OUTPUT=$(pnpm publish --provenance --access public --no-git-checks 2>&1); then
-  if echo "$PUBLISH_OUTPUT" | grep -q "Cannot publish over previously published version"; then
-    log "Version $NEW_VERSION already published (detected at publish time). Skipping."
+# Build and publish to npm.
+# A publish conflict (the version already exists — possible when registry
+# caching let the earlier `npm view` safety check miss it) is benign and must
+# be treated as success. Detect it by npm's structured error CODE (`E409` /
+# `EPUBLISHCONFLICT`), not free-text stderr that can drift across npm versions
+# and locales — and confirm the already-published version is exactly the one we
+# tried to publish before swallowing the failure; any other conflict is a real
+# error.
+# `|| PUBLISH_RC=$?` keeps the failing publish from tripping `set -e`; without it
+# the assignment's non-zero status would abort before we can inspect the code.
+PUBLISH_RC=0
+PUBLISH_OUTPUT=$(pnpm publish --provenance --access public --no-git-checks 2>&1) || PUBLISH_RC=$?
+if [ "$PUBLISH_RC" -ne 0 ]; then
+  if echo "$PUBLISH_OUTPUT" | grep -qE 'E(409|PUBLISHCONFLICT)' &&
+    npm view "$PACKAGE_NAME@$NEW_VERSION" version &>/dev/null; then
+    log "Version $NEW_VERSION already published (publish conflict on the same version). Skipping."
     exit 0
   fi
   log "$PUBLISH_OUTPUT"
-  exit 1
+  exit "$PUBLISH_RC"
 fi
 log "$PUBLISH_OUTPUT"
 log "Published $PACKAGE_NAME@$NEW_VERSION"
