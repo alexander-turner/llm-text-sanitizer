@@ -1,5 +1,6 @@
 # Claude Code worktree scaffolding
 .worktrees/
+.claude/worktrees/
 
 # Dependencies
 node_modules/
