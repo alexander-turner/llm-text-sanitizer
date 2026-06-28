@@ -39,12 +39,14 @@ const invisibleChar = fc.constantFrom(
     (c) => cp(c),
   ),
 );
-const escChar = fc.constant(cp(0x1b));
+// ANSI introducers: 7-bit ESC (U+001B) and the 8-bit C1 CSI (U+009B) / OSC
+// (U+009D) so the generator builds pure-C1 sequences, not only ESC-led ones.
+const ansiIntroducerChar = fc.constantFrom(cp(0x1b), cp(0x9b), cp(0x9d));
 const adversarialChar = fc.oneof(
   unicodeChar,
   loneSurrogate,
   invisibleChar,
-  escChar,
+  ansiIntroducerChar,
 );
 const adversarialText = fc
   .array(adversarialChar, { maxLength: 80 })

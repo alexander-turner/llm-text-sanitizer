@@ -17,6 +17,8 @@ import { cp } from "./test-helpers.mjs";
 
 const ESC = cp(0x1b);
 const BEL = cp(0x07);
+const C1_CSI = cp(0x9b); // 8-bit C1 CSI (U+009B): one-byte `ESC[` equivalent
+const C1_OSC = cp(0x9d); // 8-bit C1 OSC (U+009D): one-byte `ESC]` equivalent
 const SH = cp(0x00ad); // soft hyphen (U+00AD), category Cf
 
 // ─── pass ────────────────────────────────────────────────────────────────────
@@ -51,6 +53,9 @@ describe("classifyPrompt: SGR-only colored text passes with a note", () => {
       `${ESC}[1m${ESC}[32mPASSED${ESC}[0m tests/test_x.py::test_ok ` +
         `${ESC}[1m${ESC}[31mFAILED${ESC}[0m tests/test_y.py::test_bad`,
     ],
+    // 8-bit C1 CSI SGR (U+009B 31m … U+009B 0m): pure display-only color, just
+    // like its 7-bit `ESC[31m` twin, so isSgrOnly classifies it SGR-only → note.
+    ["C1 CSI SGR color span", `${C1_CSI}31mhello${C1_CSI}0m`],
   ]) {
     it(`note: ${name}`, () => {
       assert.deepEqual(classifyPrompt(prompt), { action: "note" });
@@ -105,6 +110,11 @@ describe("classifyPrompt: non-SGR ANSI blocks", () => {
     ["DCS string", `${ESC}Pq#payload${ESC}\\`],
     ["lone ESC byte (partial sequence)", ESC],
     ["SGR-lookalike with letter param", `${ESC}[31im`],
+    // 8-bit C1 introducers: no 7-bit ESC anywhere, so the old ESC-only gate
+    // read these as clean and returned {action:"pass"}.
+    ["C1 erase display (U+009B 2J)", `${C1_CSI}2J`],
+    ["C1 cursor-position report (U+009B 6n)", `${C1_CSI}6n`],
+    ["C1 OSC title-set (U+009D 0;x BEL)", `${C1_OSC}0;x${BEL}`],
   ]) {
     it(`blocks ${name}`, () => {
       const verdict = classifyPrompt(`hello ${seq} world`);

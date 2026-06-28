@@ -24,11 +24,34 @@ import {
   LONG_RUN_THRESHOLD,
   SCATTERED_THRESHOLD,
   isSgrOnly,
+  SGR_RE,
 } from "./invisible.mjs";
 import { stripAnsiFully } from "./layer1.mjs";
 
-// eslint-disable-next-line no-control-regex -- ESC (U+001B) is exactly what we're detecting
-const ESC = /\x1b/;
+// The three raw ANSI control introducers a prompt can carry: 7-bit ESC
+// (U+001B), 8-bit C1 CSI (U+009B), and 8-bit C1 OSC (U+009D). Gating on ESC
+// alone is blind to a pure-C1 sequence whose only escape content is, e.g.,
+// `U+009B 2J` (erase) or `U+009D 0;...BEL` (OSC): Layer 1 strips it, dropping
+// the invisible count to zero, so the prompt reads clean. Layer 1's CSI/OSC
+// branches recognize all three, so this gate must too. C1 ST (U+009C) is a
+// terminator, never an introducer, so it is deliberately absent.
+// eslint-disable-next-line no-control-regex -- the raw introducers are exactly what we detect
+const ANSI_INTRODUCER = /[]/;
+
+/**
+ * True when every ANSI introducer in `prompt` belongs to a display-only SGR
+ * color sequence -- the note carve-out's precondition. `isSgrOnly` covers the
+ * 7-bit ESC and C1 CSI introducers but is blind to the C1 OSC introducer
+ * (U+009D), so a `U+009D 0;title BEL` prompt slips its check and is mis-read as
+ * SGR-only; re-test the SGR-stripped prompt against the full introducer set so
+ * a residual C1-OSC (or any non-SGR escape) denies the note and falls through
+ * to block.
+ * @param {string} prompt
+ * @returns {boolean}
+ */
+function isSgrColorOnly(prompt) {
+  return isSgrOnly(prompt) && !ANSI_INTRODUCER.test(prompt.replace(SGR_RE, ""));
+}
 
 /**
  * Human-facing block reason: what was detected, the thresholds, a code-point
@@ -77,7 +100,7 @@ export function formatReason(categories, invisibleCount, longRunSample) {
 export function classifyPrompt(prompt, strip = stripAnsiFully) {
   if (!prompt) return { action: "pass" };
 
-  const hasAnsi = ESC.test(prompt);
+  const hasAnsi = ANSI_INTRODUCER.test(prompt);
   const deAnsi = strip(prompt);
 
   const longRunSample = deAnsi.match(LONG_RUN_RE)?.[0] ?? null;
@@ -89,7 +112,7 @@ export function classifyPrompt(prompt, strip = stripAnsiFully) {
 
   // Display-only color codes in an otherwise clean prompt: pass with a note
   // instead of blocking, so pasted colored logs remain usable.
-  if (hasAnsi && invisiblesBelowThreshold && isSgrOnly(prompt))
+  if (hasAnsi && invisiblesBelowThreshold && isSgrColorOnly(prompt))
     return { action: "note" };
 
   // CHECKS pairs a machine-readable category code with its detector; map each
