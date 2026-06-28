@@ -165,6 +165,38 @@ describe("property: hidden-style variants flagged by isHiddenStyle", () => {
   }
 });
 
+describe("property: isHiddenStyle never throws on arbitrary input", () => {
+  it("returns a boolean for any string", () =>
+    checkProperty(fc.string(), (styleString) => {
+      assert.equal(typeof isHiddenStyle(styleString), "boolean");
+    }));
+  it("returns a boolean for plausibly-CSS strings", () => {
+    const cssLike = fc
+      .array(
+        fc
+          .tuple(
+            fc.constantFrom(
+              "color",
+              "opacity",
+              "transform",
+              "clip-path",
+              "left",
+              "font-size",
+              "background",
+              "visibility",
+            ),
+            fc.string({ maxLength: 20 }),
+          )
+          .map(([prop, value]) => `${prop}:${value}`),
+        { maxLength: 5 },
+      )
+      .map((decls) => decls.join(";"));
+    checkProperty(cssLike, (styleString) => {
+      assert.equal(typeof isHiddenStyle(styleString), "boolean");
+    });
+  });
+});
+
 // ─── 3. URL exfil monotonicity ───────────────────────────────────────────────
 
 const base64Char = fc.constantFrom(

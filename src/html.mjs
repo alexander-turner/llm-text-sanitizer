@@ -45,15 +45,130 @@ export {
 
 // ─── Layer 2: hidden-content detection ───────────────────────────────────────
 
+// A length/opacity/size is "near zero" when its magnitude is below this — a
+// browser renders 0.0001px text or 0.001 opacity as effectively invisible, so
+// requiring an exact 0 lets a trivially-perturbed value slip through.
+const NEAR_ZERO_EPSILON = 0.01;
+
+/** @param {string} value @returns {boolean} */
+function isNearZeroLength(value) {
+  if (!value) return false;
+  const number = parseFloat(value);
+  return Number.isFinite(number) && Math.abs(number) < NEAR_ZERO_EPSILON;
+}
+
+// A negative offset is "offscreen" once it pushes content past the viewport
+// edge — but how far that is depends on the unit. An absolute unit (px and the
+// font/char units) needs a large magnitude (~-900px); a viewport/percent unit
+// pushes a full screen-width with a single-digit-ish magnitude (-50vw, -100%
+// clear the viewport), so it gets a small threshold. `calc(...)` and other
+// un-parseable offscreen-shaped values fail closed (treated as hidden).
+const OFFSCREEN_ABSOLUTE_THRESHOLD = -900;
+const OFFSCREEN_VIEWPORT_THRESHOLD = -50;
+const ABSOLUTE_UNIT_RE = /^-?\d*\.?\d+\s*(?:px|em|rem|ex|ch|pt|pc|in|cm|mm)?$/;
+const VIEWPORT_UNIT_RE = /^-?\d*\.?\d+\s*(?:vw|vh|vmin|vmax|%)$/;
+
+/** @param {string} value @returns {boolean} */
+function isOffscreenOffset(value) {
+  if (!value) return false;
+  if (ABSOLUTE_UNIT_RE.test(value))
+    return parseFloat(value) < OFFSCREEN_ABSOLUTE_THRESHOLD;
+  if (VIEWPORT_UNIT_RE.test(value))
+    return parseFloat(value) <= OFFSCREEN_VIEWPORT_THRESHOLD;
+  // `calc(-100vw)` / `calc(-9999px - 1em)` and other complex expressions: a
+  // unit-blind parseFloat can't resolve them, so fail closed when the value is
+  // shaped like an offscreen push (contains a large-ish negative number).
+  const calcMatch = value.match(/calc\([^)]*\)/);
+  if (calcMatch) return /-\s*\d/.test(calcMatch[0]);
+  return false;
+}
+
+/**
+ * A `transform` that renders text invisible: scaled to (near) nothing, rotated
+ * edge-on (a quarter turn around X or Y leaves a zero-area projection), or
+ * translated far off any viewport.
+ * @param {string} transform
+ * @returns {boolean}
+ */
+function isHidingTransform(transform) {
+  if (!transform) return false;
+  // scale()/matrix() with a (near-)zero factor.
+  const scale = transform.match(
+    /\b(?:scale|scale3d|scalex|scaley|matrix|matrix3d)\(\s*(-?\d*\.?\d+)/,
+  );
+  if (scale && Math.abs(parseFloat(scale[1])) < NEAR_ZERO_EPSILON) return true;
+  // rotateX/rotateY by an odd multiple of 90deg turns the box edge-on (zero
+  // projected area). Only the axis-specific rotations collapse to a line; a
+  // plain rotate()/rotateZ() spins in-plane and stays visible.
+  const rotate = transform.match(/\brotate[xy]\(\s*(-?\d*\.?\d+)deg/i);
+  if (rotate) {
+    const degrees = ((parseFloat(rotate[1]) % 360) + 360) % 360;
+    if (degrees === 90 || degrees === 270) return true;
+  }
+  // translateX/translateY/translate far off-screen.
+  for (const match of transform.matchAll(/\btranslate(?:[xy])?\(\s*([^,)]+)/gi))
+    if (isOffscreenOffset(match[1].trim())) return true;
+  return false;
+}
+
 /** @param {(key: string) => string} val */
 function isPositionedOffscreen(val) {
   if (!/\babsolute\b|\bfixed\b/.test(val("position"))) return false;
-  for (const side of ["left", "top", "right", "bottom"]) {
-    const value = val(side);
-    if (value && parseFloat(value) < -900) return true;
-  }
+  for (const side of ["left", "top", "right", "bottom"])
+    if (isOffscreenOffset(val(side))) return true;
   const clip = val("clip");
   return Boolean(clip && /rect\s*\(\s*0/.test(clip));
+}
+
+// CSS named colors that participate in a white-on-white / black-on-black style
+// of hiding. The full named-color set is unnecessary — only colors that
+// commonly back hidden text need a canonical form for the equality compare.
+/** @type {Record<string, string>} */
+const NAMED_COLORS = {
+  white: "#ffffff",
+  black: "#000000",
+  red: "#ff0000",
+  transparent: "transparent",
+};
+
+/**
+ * Canonicalize a CSS color to lowercase `#rrggbb` so `white`, `#FFF`,
+ * `#ffffff`, and `rgb(255, 255, 255)` all compare equal. Returns the trimmed
+ * lowercased input unchanged when it is not a form we recognize (so two
+ * identical unknown notations still compare equal, and a mismatch never
+ * falsely reads as same-color).
+ * @param {string} raw
+ * @returns {string}
+ */
+function canonicalizeColor(raw) {
+  const value = raw.trim().toLowerCase();
+  if (!value) return "";
+  if (value in NAMED_COLORS) return NAMED_COLORS[value];
+  const shortHex = value.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/);
+  if (shortHex)
+    return `#${shortHex[1]}${shortHex[1]}${shortHex[2]}${shortHex[2]}${shortHex[3]}${shortHex[3]}`;
+  if (/^#[0-9a-f]{6}$/.test(value)) return value;
+  const rgb = value.match(
+    /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,[^)]*)?\)$/,
+  );
+  if (rgb) {
+    /** @param {string} n */
+    const hex = (n) => Number(n).toString(16).padStart(2, "0");
+    return `#${hex(rgb[1])}${hex(rgb[2])}${hex(rgb[3])}`;
+  }
+  return value;
+}
+
+// The leading color token of a `background` shorthand (the first token that
+// canonicalizes to a real color), so `background:#fff url(x)` still compares.
+/** @param {string} shorthand @returns {string} */
+function backgroundColor(shorthand) {
+  for (const token of shorthand.split(/\s+/)) {
+    const color = canonicalizeColor(token);
+    if (color && (color.startsWith("#") || color === "transparent"))
+      return color;
+  }
+  return "";
 }
 
 /** @param {(key: string) => string} val */
@@ -101,52 +216,45 @@ export function isHiddenStyle(styleStr) {
   const val = (key) => (props[key] || "").toString().trim().toLowerCase();
 
   if (val("display") === "none") return true;
-  if (val("visibility") === "hidden") return true;
+  if (val("visibility") === "hidden" || val("visibility") === "collapse")
+    return true;
 
-  const opacity = parseFloat(val("opacity"));
-  if (val("opacity") !== "" && opacity === 0) return true;
+  const opacity = val("opacity");
+  if (opacity !== "" && Math.abs(parseFloat(opacity)) < NEAR_ZERO_EPSILON)
+    return true;
 
-  for (const dim of ["height", "width", "font-size"]) {
-    const value = val(dim);
-    if (value && parseFloat(value) === 0) return true;
-  }
+  for (const dim of ["height", "width", "font-size"])
+    if (isNearZeroLength(val(dim))) return true;
 
   if (isPositionedOffscreen(val)) return true;
 
-  const textIndent = val("text-indent");
-  if (textIndent && parseFloat(textIndent) < -900) return true;
+  if (isOffscreenOffset(val("text-indent"))) return true;
 
-  // Clipped or scaled to nothing: modern equivalents of the legacy
-  // `clip: rect(0…)` above. Only the clip shapes that collapse the box to
-  // nothing are flagged — the canonical "visually hidden" utilities
-  // (`inset(50%)`…`inset(100%)`, `circle(0)`) abused to hide injected text.
-  // Decorative clips (`circle(50%)`, partial `inset`s, polygon shapes) render
-  // visible content and are left alone. A zero scale collapses the box too.
+  // Clipped to nothing: the modern equivalent of the legacy `clip: rect(0…)`.
+  // `inset(50%)`…`inset(100%)` (including fractional `inset(99.9%)`) collapse
+  // the box, as does `circle(0)`. Decorative clips (`circle(50%)`, small
+  // `inset`s, polygons) render visible content and are left alone.
   const clipPath = val("clip-path");
   if (
     clipPath &&
-    /\b(?:inset\(\s{0,8}(?:[5-9][0-9]|100)%|circle\(\s{0,8}0(?![.\d]))/.test(
+    /\b(?:inset\(\s{0,8}(?:[5-9]\d(?:\.\d+)?|100)%|circle\(\s{0,8}0(?![.\d]))/.test(
       clipPath,
     )
   )
     return true;
-  const transform = val("transform");
-  if (
-    transform &&
-    /\b(?:scale|scale3d|scalex|scaley|matrix|matrix3d)\(\s{0,8}0(?![.\d])/.test(
-      transform,
-    )
-  )
-    return true;
+  if (isHidingTransform(val("transform"))) return true;
 
   // Same-color text on its background (white-on-white) and fully transparent
-  // text are invisible to a human but plain text to the model.
-  const color = val("color");
+  // text are invisible to a human but plain text to the model. Colors are
+  // canonicalized so `white`/`#fff`/`rgb(255,255,255)` mixes still compare.
+  const color = canonicalizeColor(val("color"));
   if (color === "transparent") return true;
-  const background = val("background-color") || val("background");
-  // The `background` guard also rejects the both-absent case: two empty values
-  // are equal, so without it an unstyled element would read as hidden.
-  if (background && color === background) return true;
+  const background =
+    canonicalizeColor(val("background-color")) ||
+    backgroundColor(val("background"));
+  // Require a real (non-empty) canonical color on both sides: two empty values
+  // are equal, so without this an unstyled element would read as hidden.
+  if (color && background && color === background) return true;
 
   return isOverflowHidden(val);
 }
@@ -364,7 +472,7 @@ const mdParser = unified().use(remarkParse).use(remarkGfm);
  * @param {Array<{start: number, end: number, kind: "comment" | "hidden"}>} ranges
  */
 function collectCommentRanges(value, base, nodeEnd, ranges) {
-  for (let searchFrom = 0; ; ) {
+  for (let searchFrom = 0; ;) {
     const open = value.indexOf("<!--", searchFrom);
     if (open === -1) break;
     const close = value.indexOf("-->", open + 2);

@@ -48,12 +48,51 @@ const CORPUS = {
       input: hidden("overflow:hidden;max-width:0"),
     },
     { name: "font-size-zero", input: hidden("font-size:0") },
+    { name: "font-size-near-zero", input: hidden("font-size:0.0001px") },
     { name: "clip-path-inset", input: hidden("clip-path:inset(50%)") },
+    {
+      name: "clip-path-inset-fractional",
+      input: hidden("clip-path:inset(99.9%)"),
+    },
+    { name: "visibility-collapse", input: hidden("visibility:collapse") },
+    { name: "opacity-near-zero", input: hidden("opacity:0.001") },
     { name: "transform-scale-zero", input: hidden("transform:scale(0)") },
+    {
+      name: "transform-scale-near-zero",
+      input: hidden("transform:scale(0.0001)"),
+    },
+    {
+      name: "transform-rotatey-edge-on",
+      input: hidden("transform:rotateY(90deg)"),
+    },
+    {
+      name: "transform-rotatex-edge-on",
+      input: hidden("transform:rotateX(90deg)"),
+    },
+    {
+      name: "transform-translate-offscreen",
+      input: hidden("transform:translateX(-9999px)"),
+    },
+    {
+      name: "offscreen-left-vw",
+      input: hidden("position:absolute;left:-50vw"),
+    },
+    {
+      name: "offscreen-left-calc",
+      input: hidden("position:fixed;left:calc(-100vw)"),
+    },
     { name: "transparent-text", input: hidden("color:transparent") },
     {
       name: "white-on-white",
       input: hidden("color:white;background-color:white"),
+    },
+    {
+      name: "white-on-white-mixed-notation",
+      input: hidden("color:#FFFFFF;background-color:rgb(255, 255, 255)"),
+    },
+    {
+      name: "black-on-black-shorthand",
+      input: hidden("color:#000;background:rgb(0,0,0) url(x)"),
     },
     {
       name: "aria-hidden-span",
