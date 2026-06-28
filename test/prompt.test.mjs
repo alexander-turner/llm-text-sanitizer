@@ -159,16 +159,18 @@ describe("classifyPrompt: the strip seam runs before the invisible-char count", 
     assert.match(verdict.reason, /Invisible char count: 0/);
   });
 
-  it("the default stripAnsiFully has a stricter OSC grammar, so the run survives and is counted too", () => {
-    // stripAnsiFully's OSC param class does not admit a soft hyphen, so the OSC
-    // is not matched as a unit; the residual ESC is swept but the invisibles
-    // remain — still a block, now flagging BOTH the ANSI escape and the run.
+  it("the default stripAnsiFully consumes the whole OSC, so the embedded run is neutralized before it can be counted", () => {
+    // stripAnsiFully now matches an OSC string as a UNIT (introducer → body →
+    // terminator), so the soft-hyphen run hidden inside the OSC title is removed
+    // with it — exactly like the injected OSC-consuming stripper above. The
+    // prompt is still blocked for the ANSI escape, but no invisible run survives
+    // to count (an OSC body can no longer smuggle a payload past the seam).
     const verdict = classifyPrompt(prompt);
     assert.equal(verdict.action, "block");
-    assert.match(verdict.reason, /Format chars \(Cf\)/);
     assert.match(verdict.reason, /ANSI escapes/);
-    assert.match(verdict.reason, /Long-run sample \(first 16 code points\)/);
-    assert.match(verdict.reason, /U\+00AD/);
+    assert.doesNotMatch(verdict.reason, /Format chars \(Cf\)/);
+    assert.doesNotMatch(verdict.reason, /Long-run sample/);
+    assert.match(verdict.reason, /Invisible char count: 0/);
   });
 
   it("an injected no-op strip leaves the invisibles in place, so the long run is counted too", () => {

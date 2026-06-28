@@ -165,6 +165,82 @@ describe("property: hidden-style variants flagged by isHiddenStyle", () => {
   }
 });
 
+// Ordinary visible declarations a real page emits. isHiddenStyle splices the
+// element's content out of the model's view, so flagging any of these would
+// DELETE legitimate text — a curated allowlist pins that none ever reads as
+// hidden, even wrapped in the same whitespace/!important/case noise the
+// positive fuzz uses.
+const visibleDeclaration = fc.constantFrom(
+  "opacity: 0.15",
+  "opacity: 0.5",
+  "opacity: 1",
+  "font-size: 11px",
+  "font-size: 0.9em",
+  "font-size: 14px",
+  "transform: scale(0.8)",
+  "transform: rotateY(45deg)",
+  "transform: rotateY(89deg)",
+  "transform: rotate(90deg)",
+  "transform: translateX(-5px)",
+  "position: absolute; left: -5px",
+  "position: absolute; top: -1px",
+  "position: absolute; left: -50vw",
+  "position: absolute; left: -50%",
+  "position: absolute; left: -10%",
+  "position: absolute; left: calc(100% - 5px)",
+  "margin-left: -2em",
+  "text-indent: -0.5em",
+  "clip-path: inset(10%)",
+  "clip-path: circle(50%)",
+  "color: white",
+  "color: white; background: #fefefe",
+  "color: #777; background: #888",
+  "color: red",
+);
+
+describe("property: ordinary visible styles are never flagged hidden", () => {
+  it("no curated visible declaration reads as hidden under noise", () =>
+    checkProperty(wrapWithNoise(visibleDeclaration), (styleString) =>
+      assert.equal(
+        isHiddenStyle(styleString),
+        false,
+        `false positive: ${JSON.stringify(styleString)}`,
+      ),
+    ));
+});
+
+describe("property: isHiddenStyle never throws on arbitrary input", () => {
+  it("returns a boolean for any string", () =>
+    checkProperty(fc.string(), (styleString) => {
+      assert.equal(typeof isHiddenStyle(styleString), "boolean");
+    }));
+  it("returns a boolean for plausibly-CSS strings", () => {
+    const cssLike = fc
+      .array(
+        fc
+          .tuple(
+            fc.constantFrom(
+              "color",
+              "opacity",
+              "transform",
+              "clip-path",
+              "left",
+              "font-size",
+              "background",
+              "visibility",
+            ),
+            fc.string({ maxLength: 20 }),
+          )
+          .map(([prop, value]) => `${prop}:${value}`),
+        { maxLength: 5 },
+      )
+      .map((decls) => decls.join(";"));
+    checkProperty(cssLike, (styleString) => {
+      assert.equal(typeof isHiddenStyle(styleString), "boolean");
+    });
+  });
+});
+
 // ─── 3. URL exfil monotonicity ───────────────────────────────────────────────
 
 const base64Char = fc.constantFrom(

@@ -15,21 +15,51 @@ import { stripInvisibleWithReport, CATEGORY } from "./invisible.mjs";
 // eslint-disable-next-line no-control-regex -- matching the raw introducers is the point
 const CONTROL_INTRODUCER_RE = /[\u001b\u009b]/g;
 
-// Full ANSI escape grammar (CSI/SGR/OSC-with-BEL), not just SGR: the Layer-1
-// guarantee is that no control introducer survives, and a cursor-move or
-// erase sequence is as much a display-spoofing hazard as a color one.
+// An OSC (Operating System Command) string is `<introducer> … <terminator>`.
+// Introducer: 7-bit `ESC]` or 8-bit C1 OSC (U+009D). Terminator: ST (`ESC\` or
+// 8-bit C1 ST U+009C) OR the legacy BEL (U+0007). The body is everything up to
+// the terminator — a title, a clickable-hyperlink URL, a clipboard write — i.e.
+// attacker-controlled PAYLOAD TEXT. Matching the introducer alone (leaving the
+// body) would let that payload survive into the model's view, so the OSC branch
+// consumes the introducer, the whole body, AND the terminator as one unit.
+//
+// Two alternatives, tried in order: (1) a properly TERMINATED string — a body
+// of bytes that no terminator can start with (the negated class makes that run
+// unambiguous and backtrack-free), then a terminator; (2) anything else from
+// the introducer to END-OF-STRING (`[\s\S]*$`). Alternative 2 is the fail-closed
+// catch-all: an UNTERMINATED introducer, or one whose only "terminator" is an
+// interior bare ESC (which is not a valid ST), drops the entire dangling
+// remainder rather than leaving the C1-OSC introducer (U+009D) and its payload
+// behind for the next pass to mis-handle (that residue broke idempotence). Both
+// alternatives are linear, so the branch stays linear.
+const OSC_INTRO = "(?:\\u001b\\]|\\u009d)";
+const OSC_TERM = "(?:\\u001b\\\\|\\u009c|\\u0007)";
+const OSC_BRANCH = `${OSC_INTRO}(?:[^\\u0007\\u001b\\u009c\\u009d]*${OSC_TERM}|[\\s\\S]*$)`;
+
+// CSI / two-byte ESC sequences (cursor moves, erase, SGR color, charset/DEC
+// selectors): an introducer, a bounded private-intro run, optional numeric
+// params, and a single final byte. Not an enforcement boundary on its own — any
+// introducer this declines to match is still removed by the residual sweep in
+// applyLayer1 — but matching the whole sequence keeps the common case one clean
+// deletion (and avoids a lone-ESC residual on every styled line).
 //
 // The private-intro class is BOUNDED ({0,12}, not *) on purpose: ; and # live
-// in both this class and the parameter groups that follow, so an unbounded *
+// in both this class and the parameter group that follows, so an unbounded *
 // here lets a ;#;#... run be split between the two quantifiers — O(n^2)
 // backtracking on an ESC;#;#... string that never completes a sequence
 // (CodeQL js/polynomial-redos). A constant bound makes the intro a constant
 // factor, so the whole match is linear; a real sequence never carries more than
-// a couple of intro bytes, and any ESC the regex declines to match is still
-// removed by the residual-introducer sweep in applyLayer1.
-// prettier-ignore
-// eslint-disable-next-line no-control-regex -- matching ESC-led sequences is the point
-const ANSI_RE = /[\u001b\u009b][[\]()#;?]{0,12}(?:(?:(?:(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
+// a couple of intro bytes.
+const CSI_BRANCH =
+  "[\\u001b\\u009b][[()#;?]{0,12}(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~])";
+
+// Full ANSI escape grammar (OSC first so `ESC]` / C1-OSC is consumed as a whole
+// string, not split by the CSI branch), not just SGR: the Layer-1 guarantee is
+// that no control introducer and no OSC payload survives, and a cursor-move or
+// erase sequence is as much a display-spoofing hazard as a color one. Built from
+// `\uXXXX`-escaped string parts via `new RegExp`, so no raw control byte sits in
+// the source (no no-control-regex disable needed).
+const ANSI_RE = new RegExp(`(?:${OSC_BRANCH}|${CSI_BRANCH})`, "gu");
 
 // Unpaired UTF-16 surrogates (high not followed by low, or low not preceded by
 // high). Normalized before any HTML parser, which throws on a stray byte —

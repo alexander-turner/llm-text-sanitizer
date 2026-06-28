@@ -14,11 +14,23 @@ export const VS = [
   .map((codePoint) => String.fromCodePoint(codePoint))
   .join("");
 
+// Combining marks (general category Mn) that carry NO advance width \u2014 they
+// render as nothing on their own, so a run of them is a hidden channel exactly
+// like a zero-width Cf char, yet \p{Cf} misses them (they are Mn). Strictly
+// enumerated, one reason per entry, because MOST Mn marks DO have visible width
+// (accents, vowel signs) and must never be stripped \u2014 only these zero-advance
+// ones qualify. Driven as an SSOT so the test iterates one case per member.
+//   U+034F COMBINING GRAPHEME JOINER \u2014 invisible; affects only collation/shaping
+//   U+17B4 KHMER VOWEL INHERENT AQ   \u2014 zero-width inherent vowel, renders blank
+//   U+17B5 KHMER VOWEL INHERENT AA   \u2014 zero-width inherent vowel, renders blank
+export const ZERO_WIDTH_MN = "\u034F\u17B4\u17B5";
+
 // Code points that render blank / zero-width but are NOT general category Cf,
 // so the \p{Cf} check below misses them: the Hangul fillers (category Lo,
-// U+115F/U+1160/U+3164/U+FFA0) and the Braille blank pattern (category So,
-// U+2800). A run of these carries a hidden payload exactly as zero-widths do.
-export const BLANK_NON_CF = "\u115F\u1160\u3164\uFFA0\u2800";
+// U+115F/U+1160/U+3164/U+FFA0), the Braille blank pattern (category So,
+// U+2800), and the zero-width combining marks above (category Mn). A run of any
+// of these carries a hidden payload exactly as zero-widths do.
+export const BLANK_NON_CF = "\u115F\u1160\u3164\uFFA0\u2800" + ZERO_WIDTH_MN;
 
 const REGEX_FLAGS = "gu";
 
@@ -56,6 +68,11 @@ export const CATEGORY_LABELS = Object.freeze({
 export const CHECKS = [
   [CATEGORY.CF, new RegExp(`\\p{Cf}`, REGEX_FLAGS)],
   [CATEGORY.VARIATION_SELECTORS, new RegExp(`[${VS}]`, REGEX_FLAGS)],
+  // BLANK_NON_CF includes zero-width COMBINING marks (Mn: U+034F/17B4/17B5). In
+  // a `u`-flag class each matches its own single code point — exactly the intent
+  // (we strip the lone mark, never a base+mark grapheme), so the
+  // misleading-character-class heuristic is a false positive here.
+  // eslint-disable-next-line no-misleading-character-class -- single-code-point matches under the u flag are intentional
   [CATEGORY.BLANK_FILLERS, new RegExp(`[${BLANK_NON_CF}]`, REGEX_FLAGS)],
 ];
 
@@ -64,26 +81,36 @@ export const STRIP = new RegExp(
   REGEX_FLAGS,
 );
 
-// SGR (Select Graphic Rendition): ESC [ <digits/semicolons> m — colors, bold,
-// reset. The grammar is closed: params are [0-9;]* and the final byte is `m`,
-// so a match can only restyle text, never reposition the cursor, erase, or
-// smuggle an OSC string. Text is "SGR-only" when removing these leaves no ESC
-// byte at all — a lone or partial escape therefore is not SGR-only.
+// SGR (Select Graphic Rendition): colors, bold, reset. The grammar is closed:
+// params are [0-9;]* and the final byte is `m`, so a match can only restyle
+// text, never reposition the cursor, erase, or smuggle an OSC string. A SGR
+// sequence has TWO encodings: the 7-bit `ESC [ … m` and the 8-bit C1 form where
+// a single U+009B (CSI) replaces `ESC [`. Both must be recognized — otherwise a
+// C1-introduced `U+009B 31m … 0m` is pure color yet is misread as a non-SGR
+// payload (or, worse, mistaken for SGR-only when its introducer was a C1 CSI
+// that isSgrOnly's ESC-only test never saw). Text is "SGR-only" when removing
+// these leaves no ANSI control introducer at all — a lone or partial escape is
+// therefore not SGR-only.
 // eslint-disable-next-line no-control-regex -- matching ESC-led sequences is the point
-export const SGR_RE = /\x1b\[[0-9;]*m/g;
+export const SGR_RE = /(?:\x1b\[|)[0-9;]*m/g;
 
-// eslint-disable-next-line no-control-regex -- ESC (U+001B) is exactly what we test for
-const ESC_RE = /\x1b/;
+// The two raw ANSI control introducers: 7-bit ESC (U+001B) and 8-bit C1 CSI
+// (U+009B). isSgrOnly is honest only if it tests for BOTH — a C1 cursor-move or
+// erase (`U+009B 2J`) leaves a U+009B after SGR removal and must read as NOT
+// SGR-only, exactly as its 7-bit `ESC[2J` twin does.
+// eslint-disable-next-line no-control-regex -- the raw introducers are what we test for
+const CONTROL_INTRODUCER_RE = /[\x1b]/;
 
 /**
- * True when every ESC byte in `text` belongs to a display-only SGR color
- * sequence (so stripping the ANSI removed only cosmetic styling, nothing that
- * could move the cursor, erase, or carry a payload).
+ * True when every ANSI control introducer in `text` belongs to a display-only
+ * SGR color sequence (so stripping the ANSI removed only cosmetic styling,
+ * nothing that could move the cursor, erase, or carry a payload). Recognizes
+ * both the 7-bit `ESC[…m` and 8-bit C1 (`U+009B…m`) SGR encodings.
  * @param {string} text
  * @returns {boolean}
  */
 export function isSgrOnly(text) {
-  return !ESC_RE.test(text.replace(SGR_RE, ""));
+  return !CONTROL_INTRODUCER_RE.test(text.replace(SGR_RE, ""));
 }
 
 export const LONG_RUN_THRESHOLD = 10;
@@ -113,6 +140,19 @@ const BOM = "\uFEFF";
 // clearly belong to the context.
 const ZWNJ = 0x200c;
 const ZWJ = 0x200d;
+
+// Max joiners the carve-out will PRESERVE within one uninterrupted joined
+// sequence (a `letter (joiner letter)*` run, or an emoji ZWJ sequence). A real
+// word or emoji glyph needs only a handful in a row — the longest standard emoji
+// ZWJ sequences (family-of-four, profession+ZWJ) carry three; a Persian
+// compound a couple. Past this many consecutive PRESERVED joiners with no real
+// gap between them, the run is treated as a zero-width payload channel (an
+// attacker alternates `letter joiner letter joiner …` to stay both under the
+// scatter floor AND in a per-joiner "linguistic" context) and the surplus
+// joiners are stripped. The counter resets at any genuine gap — two visible
+// characters in a row, i.e. text that is NOT part of a joined cluster — so an
+// ordinary single linguistic/emoji joiner per word is always preserved.
+export const CONSECUTIVE_JOINER_CAP = 8;
 
 // Scripts whose orthography uses ZWNJ/ZWJ between letters as a rendering
 // control. Single source of truth: LINGUISTIC_LETTER is built from this list,
@@ -214,21 +254,34 @@ function carveStrip(body) {
   const allowCarveOut = invisCount < SCATTERED_THRESHOLD;
   const foundCodes = new Set();
   let out = "";
+  // Joiners preserved so far in the current uninterrupted joined sequence. A
+  // genuine gap (two visible chars in a row — see prevVisible) resets it to 0;
+  // once it would exceed the cap the surplus joiners are stripped as payload.
+  let joinerRun = 0;
+  let prevVisible = false;
   for (let i = 0; i < cps.length; i++) {
     const ch = cps[i];
     const code = classify(ch);
     if (code === null) {
+      // A visible char following another visible char is a real word/segment
+      // boundary, not a join — the joined cluster (if any) ended here.
+      if (prevVisible) joinerRun = 0;
+      prevVisible = true;
       out += ch; // ordinary visible character
       continue;
     }
     if (
       allowCarveOut &&
+      joinerRun < CONSECUTIVE_JOINER_CAP &&
       isPreservedJoiner(ch, cps[i - 1] ?? "", cps[i + 1] ?? "")
     ) {
+      joinerRun++;
+      prevVisible = false; // a joiner keeps the cluster open
       out += ch;
       continue;
     }
     foundCodes.add(code);
+    prevVisible = false; // a stripped invisible neither opens nor closes a gap
   }
   const found = CHECKS.filter(([code]) => foundCodes.has(code)).map(
     ([code]) => code,

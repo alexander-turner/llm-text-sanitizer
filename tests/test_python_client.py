@@ -7,11 +7,13 @@ verdicts themselves are owned by the JS suite — here the CLI is the source of
 truth and the client must faithfully relay it.
 """
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -189,11 +191,21 @@ def test_drain_stderr_reads_back_worker_stderr() -> None:
 
 
 def test_killed_worker_raises_loudly_on_next_use() -> None:
+    # A worker that WAS started then died mid-use must not claim it was never
+    # used as a context manager — it reports the unexpected exit (bug #2).
     with Sanitizer() as worker:
         worker._proc.kill()
         worker._proc.wait()
-        with pytest.raises(RuntimeError, match="worker is not running"):
+        with pytest.raises(RuntimeError, match="worker exited unexpectedly"):
             worker.sanitize("x")
+
+
+def test_never_started_worker_says_use_as_context_manager() -> None:
+    # The original message is still correct for a worker that genuinely never
+    # ran: distinguish "not started" from "started then died".
+    worker = Sanitizer()
+    with pytest.raises(RuntimeError, match="use it as a context manager"):
+        worker.request({"text": "x"})
 
 
 def test_shared_worker_not_shared_across_fork() -> None:
@@ -269,3 +281,96 @@ def test_scan_and_clean_instruction_files(tmp_path: Path) -> None:
 def test_sanitize_text_uses_shared_worker_for_html() -> None:
     sanitize_text(HIDDEN_HTML, html=True)
     assert ais._worker is not None and ais._worker.is_alive()
+
+
+# ─── Robustness: framing, concurrency, death, DoS, error surfaces ─────────────
+
+
+def test_blank_request_does_not_hang_and_framing_survives() -> None:
+    # A blank request line must come back as a single structured error, never a
+    # silent skip that leaves the client's readline waiting forever. We bound the
+    # read so the unfixed worker (which skips the blank line, emitting nothing)
+    # fails fast as a timeout instead of hanging the whole suite.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Sanitizer, "_READ_TIMEOUT_S", 8.0)
+        with Sanitizer() as worker:
+            # A literally blank request line: the worker must answer it (with a
+            # structured error), not skip it and leave the read hanging.
+            worker._proc.stdin.write("\n")
+            worker._proc.stdin.flush()
+            line = worker._read_response_line()
+            assert line != ""
+            assert "error" in json.loads(line)
+            # Framing intact: a normal request right after still answers.
+            assert worker.sanitize(f"a{ZERO_WIDTH_SPACE}b").cleaned == "ab"
+
+
+def test_concurrent_threads_get_uncorrupted_responses() -> None:
+    # Drive the SHARED persistent worker from many threads at once: the
+    # per-request lock must serialize each write+read so no response is
+    # interleaved with another's, and every thread gets exactly its own answer.
+    inputs = [f"thread-{i}{ZERO_WIDTH_SPACE}" for i in range(40)]
+    results: dict[int, str] = {}
+    errors: list[Exception] = []
+    barrier = threading.Barrier(len(inputs))
+
+    def worker(i: int) -> None:
+        try:
+            barrier.wait()  # maximize contention: all fire together
+            results[i] = sanitize(inputs[i], persist=True).cleaned
+        except Exception as exc:  # noqa: BLE001 — collect for assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(inputs))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    # Each thread's cleaned text must be exactly its own input minus the ZWS — a
+    # corrupted/interleaved response would mismatch.
+    assert results == {i: f"thread-{i}" for i in range(len(inputs))}
+
+
+def test_killed_worker_includes_stderr_not_raw_ioerror() -> None:
+    # A worker killed mid-use must raise a clear sanitizer error carrying its
+    # stderr — never a bare ValueError/BrokenPipeError leaking I/O internals.
+    with Sanitizer() as worker:
+        worker._proc.kill()
+        worker._proc.wait()
+        with pytest.raises(RuntimeError, match="worker exited unexpectedly"):
+            worker.sanitize("x")
+
+
+def test_oversized_input_oneshot_raises_clear_error() -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("AGENT_SANITIZER_MAX_INPUT_BYTES", "100")
+        with pytest.raises(RuntimeError, match="request too large"):
+            sanitize("A" * 500, persist=False)
+
+
+def test_oversized_input_worker_raises_clear_error() -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("AGENT_SANITIZER_MAX_INPUT_BYTES", "100")
+        with Sanitizer() as worker:
+            with pytest.raises(RuntimeError, match="request too large"):
+                worker.sanitize("A" * 500)
+            # Worker survives the oversized request and still serves.
+            assert worker.sanitize("ok").cleaned == "ok"
+
+
+def test_non_json_stdout_raises_wrapped_error() -> None:
+    # A CLI (or fake) that prints non-JSON must surface as a clear sanitizer
+    # error naming the offending output, not a bare json.JSONDecodeError.
+    node = shutil.which("node")
+    assert node is not None
+    fake_cli = Path(tempfile.mkdtemp()) / "fake-cli.mjs"
+    fake_cli.write_text(
+        "process.stdin.resume();\nconsole.log('not json at all');\n",
+        encoding="utf-8",
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ais, "_CLI", fake_cli)
+        with pytest.raises(RuntimeError, match="non-JSON output"):
+            sanitize("x", persist=False)

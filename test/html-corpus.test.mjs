@@ -48,12 +48,47 @@ const CORPUS = {
       input: hidden("overflow:hidden;max-width:0"),
     },
     { name: "font-size-zero", input: hidden("font-size:0") },
+    { name: "font-size-near-zero", input: hidden("font-size:0.0001px") },
     { name: "clip-path-inset", input: hidden("clip-path:inset(50%)") },
+    {
+      name: "clip-path-inset-fractional",
+      input: hidden("clip-path:inset(99.9%)"),
+    },
+    { name: "visibility-collapse", input: hidden("visibility:collapse") },
+    { name: "opacity-near-zero", input: hidden("opacity:0.001") },
     { name: "transform-scale-zero", input: hidden("transform:scale(0)") },
+    {
+      name: "transform-scale-near-zero",
+      input: hidden("transform:scale(0.0001)"),
+    },
+    {
+      name: "transform-rotatey-edge-on",
+      input: hidden("transform:rotateY(90deg)"),
+    },
+    {
+      name: "transform-rotatex-edge-on",
+      input: hidden("transform:rotateX(90deg)"),
+    },
+    {
+      name: "transform-translate-offscreen",
+      input: hidden("transform:translateX(-9999px)"),
+    },
+    {
+      name: "offscreen-left-vw",
+      input: hidden("position:absolute;left:-100vw"),
+    },
     { name: "transparent-text", input: hidden("color:transparent") },
     {
       name: "white-on-white",
       input: hidden("color:white;background-color:white"),
+    },
+    {
+      name: "white-on-white-mixed-notation",
+      input: hidden("color:#FFFFFF;background-color:rgb(255, 255, 255)"),
+    },
+    {
+      name: "black-on-black-shorthand",
+      input: hidden("color:#000;background:rgb(0,0,0) url(x)"),
     },
     {
       name: "aria-hidden-span",
@@ -303,6 +338,44 @@ const CORPUS = {
       input: "https://ok.example/the-" + "quick-".repeat(40) + "end",
     },
   ],
+  // Visible content that earlier over-eager hiding heuristics could splice. A
+  // false positive here DELETES legitimate text the model needed, so each row
+  // pins that the canary SURVIVES — the precision counterpart to `hidden`.
+  visible: [
+    {
+      name: "small-negative-left",
+      input: hidden("position:absolute;left:-5px"),
+    },
+    {
+      name: "half-shift-vw",
+      input: hidden("position:absolute;left:-50vw"),
+    },
+    {
+      name: "half-shift-percent",
+      input: hidden("position:absolute;left:-50%"),
+    },
+    {
+      name: "in-flow-calc-left",
+      input: hidden("position:absolute;left:calc(100% - 5px)"),
+    },
+    {
+      name: "negative-viewport-calc",
+      input: hidden("position:fixed;left:calc(-100vw)"),
+    },
+    { name: "hanging-text-indent", input: hidden("text-indent:-0.5em") },
+    { name: "dim-opacity", input: hidden("opacity:0.15") },
+    { name: "small-font", input: hidden("font-size:11px") },
+    { name: "mild-scale", input: hidden("transform:scale(0.8)") },
+    { name: "near-edge-rotate", input: hidden("transform:rotateY(89deg)") },
+    { name: "in-plane-rotate", input: hidden("transform:rotate(90deg)") },
+    { name: "partial-clip-inset", input: hidden("clip-path:inset(10%)") },
+    { name: "color-without-bg", input: hidden("color:white") },
+    {
+      name: "near-white-mismatch",
+      input: hidden("color:white;background:#fefefe"),
+    },
+    { name: "distinct-grays", input: hidden("color:#777;background:#888") },
+  ],
 };
 
 describe("corpus: hidden content never survives sanitizeHtml", () => {
@@ -310,6 +383,15 @@ describe("corpus: hidden content never survives sanitizeHtml", () => {
     it(`removes ${name}`, () => {
       const out = sanitizeHtml(input)?.text ?? input;
       assert.equal(out.includes(CANARY), false, `survived: ${name}`);
+    });
+  }
+});
+
+describe("corpus: visible content is never spliced (precision)", () => {
+  for (const { name, input } of CORPUS.visible) {
+    it(`keeps ${name}`, () => {
+      const out = sanitizeHtml(input)?.text ?? input;
+      assert.equal(out.includes(CANARY), true, `spliced visible: ${name}`);
     });
   }
 });

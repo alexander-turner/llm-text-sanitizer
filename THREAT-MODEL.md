@@ -12,13 +12,13 @@ The three layers are independent; use only the ones your ingress needs.
 
 **What it removes**
 
-| Category                   | Examples                                                       | Why it’s a payload channel                                    |
-| -------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------- |
-| Format chars (`Cf`)        | zero-width space/joiner, bidi overrides, Unicode **tag** chars | render blank but reach the model as bytes; tags smuggle ASCII |
-| Variation selectors        | U+FE00–FE0F, U+E0100–E01EF                                     | not `Cf`; a run encodes a hidden payload                      |
-| Blank-rendering fillers    | Hangul fillers U+115F/1160/3164/FFA0, Braille blank U+2800     | render blank, not `Cf`, so a naive `\p{Cf}` strip misses them |
-| Soft hyphen / interior BOM | U+00AD, interior U+FEFF                                        | either can encode hidden instructions                         |
-| ANSI / SGR escapes         | `ESC[…m`, cursor moves, OSC                                    | repaint or hide what an operator reads in a terminal          |
+| Category                   | Examples                                                                                                       | Why it’s a payload channel                                    |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Format chars (`Cf`)        | zero-width space/joiner, bidi overrides, Unicode **tag** chars                                                 | render blank but reach the model as bytes; tags smuggle ASCII |
+| Variation selectors        | U+FE00–FE0F, U+E0100–E01EF                                                                                     | not `Cf`; a run encodes a hidden payload                      |
+| Blank-rendering fillers    | Hangul fillers U+115F/1160/3164/FFA0, Braille blank U+2800, zero-width combining marks (`Mn`) U+034F/17B4/17B5 | render blank, not `Cf`, so a naive `\p{Cf}` strip misses them |
+| Soft hyphen / interior BOM | U+00AD, interior U+FEFF                                                                                        | either can encode hidden instructions                         |
+| ANSI / SGR escapes         | `ESC[…m`, cursor moves, OSC                                                                                    | repaint or hide what an operator reads in a terminal          |
 
 **What it preserves**
 
@@ -35,7 +35,11 @@ escape its split had hidden, and removing one ANSI sequence can reconstitute
 another. Layer 1 strips ANSI to a fixed point and then sweeps any residual raw
 control introducer—7-bit ESC (U+001B) or 8-bit C1 CSI (U+009B)—outright, so the
 result carries no raw ANSI introducer for _any_ input and the operation is
-idempotent.
+idempotent. OSC strings (titles, clickable-hyperlink URLs) are consumed as a
+whole, for every terminator form—ST (`ESC\` or 8-bit C1 ST U+009C) and the
+legacy BEL—and for the 8-bit C1 OSC introducer (U+009D); an _unterminated_ OSC
+introducer is dropped through end-of-string (fail-closed), so no OSC body
+survives to carry a payload.
 
 ## Layer 2—hidden HTML (remark/rehype)
 
@@ -105,7 +109,9 @@ payload-capable invisible Unicode and ANSI. A prompt-submission channel usually
 cannot rewrite the prompt in place, so the only neutralization is to block.
 One carve-out: a prompt whose only escape content is display-only SGR color
 passes with a note (pasting colored terminal output is the common case, and SGR
-cannot move the cursor, erase, or carry an OSC payload).
+cannot move the cursor, erase, or carry an OSC payload). The SGR-only test
+recognizes both the 7-bit (`ESC[…m`) and 8-bit C1 (`U+009B…m`) encodings, so a
+C1-introduced cursor-move or erase is never mistaken for benign color.
 
 ## Tool-output pipeline & Layer 5
 

@@ -27,16 +27,58 @@
  *     on stderr — so a scripted caller fails loudly.
  *
  *   worker (`--worker`): read newline-delimited JSON requests until EOF, write
- *     one response line per request, in order. A malformed request yields an
- *     `{ "error" }` line and the worker keeps serving — the specific, necessary
- *     recovery that makes a long-lived process usable across independent
- *     requests (one bad line must not drop the whole pipe). JSON string-encodes
- *     every newline, so one request and one response always occupy one line each.
+ *     EXACTLY one response line per input line, in order — including for a blank
+ *     line (a framing slip on the caller's side), which gets an `{ "error" }`
+ *     line rather than being silently skipped. Skipping a line desyncs every
+ *     later response against a client that reads one response per request. A
+ *     malformed request likewise yields an `{ "error" }` line and the worker
+ *     keeps serving — the specific, necessary recovery that makes a long-lived
+ *     process usable across independent requests (one bad line must not drop the
+ *     whole pipe). JSON string-encodes every newline, so one request and one
+ *     response always occupy one line each.
+ *
+ * Input-size cap: both modes reject a single request larger than
+ * `AGENT_SANITIZER_MAX_INPUT_BYTES` (UTF-8 bytes, default 10 MiB) with a
+ * structured error rather than buffering an unbounded payload into memory —
+ * one-shot exits non-zero, the worker emits an `{ "error" }` line and keeps
+ * serving. Raise or lower the limit via that environment variable.
  */
+import { Buffer } from "node:buffer";
 import process from "node:process";
 import readline from "node:readline";
 
 import { sanitize } from "../src/index.mjs";
+
+/** Largest single request accepted, in UTF-8 bytes. Caps memory per request so
+ * a hostile or runaway caller can't OOM the process; override via the env var. */
+const DEFAULT_MAX_INPUT_BYTES = 10 * 1024 * 1024;
+
+/** Resolve the configured input cap, falling back to the default for an unset,
+ * empty, non-numeric, or non-positive value. */
+function maxInputBytes() {
+  const raw = process.env.AGENT_SANITIZER_MAX_INPUT_BYTES;
+  const parsed = Number(raw);
+  if (
+    raw === undefined ||
+    raw === "" ||
+    !Number.isFinite(parsed) ||
+    parsed <= 0
+  )
+    return DEFAULT_MAX_INPUT_BYTES;
+  return Math.floor(parsed);
+}
+
+/** Throw if `text` exceeds the configured byte cap. The message names the limit
+ * and the env var so a caller can act on it. */
+function enforceSizeLimit(text) {
+  const limit = maxInputBytes();
+  const size = Buffer.byteLength(text, "utf8");
+  if (size > limit)
+    throw new Error(
+      `request too large: ${size} bytes exceeds the ${limit}-byte limit ` +
+        "(raise AGENT_SANITIZER_MAX_INPUT_BYTES to accept it)",
+    );
+}
 
 /** @param {Record<string, unknown>} req @param {string} key */
 function requireString(req, key) {
@@ -103,6 +145,7 @@ const OPS = {
  * @returns {Promise<string>} a single-line JSON response
  */
 async function handle(payload) {
+  enforceSizeLimit(payload);
   const request = JSON.parse(payload);
   const op = request.op ?? "sanitize";
   const run = Object.prototype.hasOwnProperty.call(OPS, op) ? OPS[op] : null;
@@ -110,11 +153,23 @@ async function handle(payload) {
   return JSON.stringify(await run(request));
 }
 
-/** @param {NodeJS.ReadableStream} stream */
+/** Read the whole stream as UTF-8, aborting as soon as the accumulated bytes
+ * exceed the cap so a hostile one-shot caller can't force unbounded buffering.
+ * @param {NodeJS.ReadableStream} stream */
 async function readAll(stream) {
   stream.setEncoding("utf8");
+  const limit = maxInputBytes();
   let text = "";
-  for await (const chunk of stream) text += chunk;
+  let bytes = 0;
+  for await (const chunk of stream) {
+    bytes += Buffer.byteLength(chunk, "utf8");
+    if (bytes > limit)
+      throw new Error(
+        `request too large: input exceeds the ${limit}-byte limit ` +
+          "(raise AGENT_SANITIZER_MAX_INPUT_BYTES to accept it)",
+      );
+    text += chunk;
+  }
   return text;
 }
 
@@ -127,8 +182,14 @@ async function runWorker() {
   // leave in request order. The try/catch is the worker's whole reason to
   // exist: a single malformed request reports an error and the loop continues
   // rather than tearing down a pipe other requests are still using.
+  //
+  // EXACTLY one response line per input line — including a blank/whitespace line
+  // (`handle` lets `JSON.parse` reject it into an `{ error }` line). Skipping it
+  // would emit zero responses for one input line and desync a client that reads
+  // one response per request. `response` never contains a newline: `handle`
+  // returns single-line `JSON.stringify` output, and the error branch
+  // stringifies a one-key object, so the one-line-per-request framing holds.
   for await (const line of rl) {
-    if (line.trim() === "") continue;
     let response;
     try {
       response = await handle(line);
@@ -140,9 +201,19 @@ async function runWorker() {
 }
 
 async function runOneShot() {
-  // No try/catch: a bad request or a (contract-impossible) `sanitize` throw
-  // propagates to a non-zero exit with the stack on stderr — fail loudly.
-  const response = await handle(await readAll(process.stdin));
+  // Fail loudly but cleanly: a bad request (or a contract-impossible `sanitize`
+  // throw) exits non-zero with a one-line reason on stderr — not a raw Node
+  // stack, which leaks internals and is noise for a scripted caller. The
+  // message carries the sanitizer-CLI prefix so a wrapping client can attribute
+  // the failure to this bridge.
+  let response;
+  try {
+    response = await handle(await readAll(process.stdin));
+  } catch (err) {
+    process.stderr.write(`sanitize CLI: ${err?.message ?? String(err)}\n`);
+    process.exitCode = 1;
+    return;
+  }
   process.stdout.write(`${response}\n`);
 }
 

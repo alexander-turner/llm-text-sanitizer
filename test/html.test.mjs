@@ -28,66 +28,124 @@ import {
 
 const applyHtml = (text) => sanitizeHtml(text)?.text ?? text;
 
+// SSOT for the hidden-style unit cases: one row per hiding technique (and per
+// near-boundary visible counter-example). Driving the loop from this array
+// means adding a technique without a row fails to register a case. Each
+// `expectedHidden` is the exact verdict for that `style`.
+const HIDDEN_STYLE_CASES = [
+  // ── display / visibility ──
+  ["display:none", true],
+  ["DISPLAY:NONE", true],
+  ["display:none !important", true],
+  ["display:block", false],
+  ["visibility:hidden", true],
+  ["visibility:collapse", true], // collapse hides like hidden (bug: only hidden checked)
+  ["visibility:visible", false],
+  // ── opacity (epsilon, not exact 0) ──
+  ["opacity:0", true],
+  ["opacity:0.001", true], // near-zero (bug: only ===0 caught)
+  ["opacity:0.009", true],
+  ["opacity:0.15", false], // dim but readable — epsilon must stay tight
+  ["opacity:0.5", false],
+  ["opacity:1", false],
+  ["opacity:5", false],
+  // ── zero / near-zero size (epsilon) ──
+  ["height:0", true],
+  ["width:0", true],
+  ["font-size:0", true],
+  ["font-size:0.0001px", true], // sub-epsilon (bug: required exact 0)
+  ["font-size:0.005em", true],
+  ["height:5px", false],
+  ["font-size:11px", false],
+  ["font-size:0.9em", false], // ordinary relative size
+  ["font-size:14px", false],
+  // ── positioned offscreen, any unit ──
+  ["position:absolute;left:-9999px", true],
+  ["position:fixed;top:-10000px", true],
+  ["position:fixed;right:-9999px", true],
+  ["position:absolute;bottom:-9999px", true],
+  ["position:absolute;left:-901px", true],
+  ["position:absolute;left:-100vw", true], // a full viewport-width fully clears the screen
+  ["position:absolute;left:-100%", true],
+  ["clip:rect(0,0,0,0);position:absolute", true],
+  ["position:absolute;left:10px", false],
+  ["position:absolute;left:-900px", false],
+  ["position:absolute;left:-10px", false],
+  ["position:absolute;left:-5px", false], // small negative is ordinary layout
+  ["position:absolute;left:-5vw", false],
+  ["position:absolute;left:-50vw", false], // half-shift leaves it on screen (precision: was over-flagged)
+  ["position:absolute;left:-50%", false], // half-shift leaves it on screen
+  ["position:absolute;left:-10%", false],
+  ["position:absolute;top:-1px", false],
+  ["position:absolute;left:calc(-100vw)", false], // unresolvable calc fails open (precision)
+  ["position:absolute;left:calc(100% - 5px)", false], // ordinary in-flow calc must not splice
+  ["position:static;left:-9999px", false],
+  ["position:absolute;left:auto", false], // non-length offset is not offscreen
+  ["position:absolute;clip:rect(1,1,1,1)", false],
+  // ── text-indent offscreen ──
+  ["text-indent:-9999px", true],
+  ["text-indent:-100vw", true],
+  ["text-indent:-900px", false],
+  ["text-indent:-0.5em", false], // ordinary hanging indent is not offscreen
+  ["text-indent:calc(2em - 1px)", false], // calc indent fails open
+  // ── overflow + zero box ──
+  ["overflow:hidden;max-width:0", true],
+  ["overflow:hidden;max-height:0", true],
+  ["overflow:visible;max-width:0", false],
+  ["overflow:hidden;max-width:5px", false],
+  // ── clip-path (fractional percentages) ──
+  ["clip-path:inset(50%)", true],
+  ["clip-path:inset(100%)", true],
+  ["clip-path:inset(99.9%)", true], // fractional (bug: regex missed it)
+  ["clip-path:circle(0)", true],
+  ["clip-path:none", false],
+  ["clip-path:circle(50%)", false],
+  ["clip-path:inset(10%)", false], // partial inset still shows content
+  ["clip-path:inset(10px)", false],
+  // ── transform: scale / rotate edge-on / translate offscreen ──
+  ["transform:scale(0)", true],
+  ["transform:scale( 0)", true],
+  ["transform:scale(0.0001)", true], // near-zero scale (bug: exact 0 only)
+  ["transform:matrix(0,0,0,0,0,0)", true],
+  ["transform:rotateY(90deg)", true], // edge-on (bug: not detected)
+  ["transform:rotateX(90deg)", true],
+  ["transform:rotateY(-90deg)", true],
+  ["transform:rotateX(270deg)", true],
+  ["transform:translateX(-9999px)", true], // offscreen via transform (bug: position-only)
+  ["transform:translatex(-100vw)", true], // a full viewport-width clears the screen
+  ["transform:translatex(-50vw)", false], // half-shift stays partly visible (precision)
+  ["transform:scale(0.5)", false],
+  ["transform:scale(0.8)", false], // mild shrink stays readable
+  ["transform:translatex(5px)", false],
+  ["transform:rotate(90deg)", false], // 2D in-plane spin stays visible
+  ["transform:rotateZ(90deg)", false],
+  ["transform:rotateY(45deg)", false],
+  ["transform:rotateY(89deg)", false], // near-edge-on but still projects area
+  // ── same-color text/background across notations ──
+  ["color:transparent", true],
+  ["color:white;background-color:white", true],
+  ["color:#fff;background:#fff", true],
+  ["color:#FFFFFF;background-color:white", true], // hex vs named (bug: notation mismatch)
+  ["color:rgb(255,255,255);background:white", true], // rgb vs named
+  ["color:white;background-color:rgb(255, 255, 255)", true],
+  ["color:#000;background:rgb(0,0,0)", true], // black on black
+  ["color:white;background:#fff url(x) no-repeat", true], // background shorthand carries the color
+  ["color:red", false],
+  ["color:white", false], // color alone, no background — never infer the page bg
+  ["color:white;background:#fefefe", false], // near-white but not equal
+  ["color:#777;background:#888", false], // distinct grays
+  ["color:white;background-color:black", false],
+  ["background-color:white", false], // color absent — not same-color
+  ["color:rgb(0,0,0);background:rgb(255,255,255)", false],
+  // ── degenerate / invalid input ──
+  ["", false],
+  ["a{b:c}", false],
+];
+
 describe("unit: isHiddenStyle exact verdicts", () => {
-  const HIDDEN = [
-    "display:none",
-    "DISPLAY:NONE",
-    "display:none !important",
-    "visibility:hidden",
-    "opacity:0",
-    "height:0",
-    "width:0",
-    "font-size:0",
-    "position:absolute;left:-9999px",
-    "position:fixed;top:-10000px",
-    "position:fixed;right:-9999px",
-    "position:absolute;bottom:-9999px",
-    "position:absolute;left:-901px",
-    "clip:rect(0,0,0,0);position:absolute",
-    "text-indent:-9999px",
-    "overflow:hidden;max-width:0",
-    "overflow:hidden;max-height:0",
-    "clip-path:inset(50%)",
-    "clip-path:inset(100%)",
-    "clip-path:circle(0)",
-    "transform:scale(0)",
-    "transform:scale( 0)",
-    "transform:matrix(0,0,0,0,0,0)",
-    "color:transparent",
-    "color:white;background-color:white",
-    "color:#fff;background:#fff",
-  ];
-  const VISIBLE = [
-    "display:block",
-    "visibility:visible",
-    "opacity:0.5",
-    "opacity:1",
-    "opacity:5",
-    "height:5px",
-    "position:absolute;left:10px",
-    "position:absolute;left:-900px",
-    "position:static;left:-9999px",
-    "position:absolute;clip:rect(1,1,1,1)",
-    "text-indent:-900px",
-    "overflow:visible;max-width:0",
-    "overflow:hidden;max-width:5px",
-    "color:red",
-    "clip-path:none",
-    "clip-path:circle(50%)",
-    "clip-path:inset(10px)",
-    "transform:scale(0.5)",
-    "transform:translatex(5px)",
-    "color:white;background-color:black",
-    "background-color:white",
-    "",
-    "a{b:c}",
-  ];
-  for (const style of HIDDEN)
-    it(`flags ${JSON.stringify(style)}`, () =>
-      assert.equal(isHiddenStyle(style), true));
-  for (const style of VISIBLE)
-    it(`leaves ${JSON.stringify(style)}`, () =>
-      assert.equal(isHiddenStyle(style), false));
+  for (const [style, expectedHidden] of HIDDEN_STYLE_CASES)
+    it(`${expectedHidden ? "flags" : "leaves"} ${JSON.stringify(style)}`, () =>
+      assert.equal(isHiddenStyle(style), expectedHidden));
 });
 
 describe("unit: isHiddenElement exact verdicts", () => {

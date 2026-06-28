@@ -97,6 +97,79 @@ describe("CLI: worker mode", () => {
     assert.equal(out.split("\n").length, 1);
     assert.deepEqual(JSON.parse(out), envelope(await sanitize(text)));
   });
+
+  it("emits exactly one error line for a blank line, keeping framing", () => {
+    // A blank/whitespace request line must NOT be silently skipped: a skip emits
+    // zero responses for one input line and desyncs every later response against
+    // a one-response-per-request client. We assert one response PER input line
+    // and that the following real request still answers correctly.
+    const input = `\n   \n${JSON.stringify({ text: "ok" })}\n`;
+    const lines = run(["--worker"], input).trim().split("\n");
+    assert.equal(lines.length, 3); // blank, whitespace, real → 3 responses
+    assert.ok(JSON.parse(lines[0]).error);
+    assert.ok(JSON.parse(lines[1]).error);
+    assert.deepEqual(JSON.parse(lines[2]), {
+      cleaned: "ok",
+      found: [],
+      warnings: [],
+    });
+  });
+});
+
+describe("CLI: input-size cap (DoS guard)", () => {
+  const overLimit = JSON.stringify({ text: "A".repeat(200) });
+  const underLimit = JSON.stringify({ text: "ok" });
+
+  it("one-shot rejects an oversized request with a non-zero exit", () => {
+    assert.throws(
+      () =>
+        execFileSync("node", [CLI], {
+          input: overLimit,
+          encoding: "utf8",
+          env: { ...process.env, AGENT_SANITIZER_MAX_INPUT_BYTES: "50" },
+        }),
+      (err) => {
+        assert.equal(err.status, 1);
+        assert.match(String(err.stderr), /request too large/);
+        assert.match(String(err.stderr), /AGENT_SANITIZER_MAX_INPUT_BYTES/);
+        return true;
+      },
+    );
+  });
+
+  it("worker returns an error line for an oversized request and keeps serving", () => {
+    const out = execFileSync("node", [CLI, "--worker"], {
+      input: `${overLimit}\n${underLimit}\n`,
+      encoding: "utf8",
+      env: { ...process.env, AGENT_SANITIZER_MAX_INPUT_BYTES: "50" },
+    });
+    const lines = out.trim().split("\n");
+    assert.equal(lines.length, 2);
+    assert.match(JSON.parse(lines[0]).error, /request too large/);
+    assert.deepEqual(JSON.parse(lines[1]), {
+      cleaned: "ok",
+      found: [],
+      warnings: [],
+    });
+  });
+
+  it("ignores a non-positive / non-numeric limit, using the default", () => {
+    // A bogus override must not disable the cap or set it to zero (which would
+    // reject everything); it falls back to the generous default, so a small
+    // request still succeeds.
+    for (const bogus of ["0", "-1", "notanumber", ""]) {
+      const out = execFileSync("node", [CLI], {
+        input: underLimit,
+        encoding: "utf8",
+        env: { ...process.env, AGENT_SANITIZER_MAX_INPUT_BYTES: bogus },
+      });
+      assert.deepEqual(JSON.parse(out), {
+        cleaned: "ok",
+        found: [],
+        warnings: [],
+      });
+    }
+  });
 });
 
 describe("CLI: one-shot fails loudly on a bad request", () => {
