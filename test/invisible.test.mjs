@@ -19,11 +19,14 @@ import {
   CATEGORY_LABELS,
   VS,
   BLANK_NON_CF,
+  ZERO_WIDTH_MN,
   LONG_RUN_RE,
   LONG_RUN_THRESHOLD,
   SCATTERED_THRESHOLD,
+  CONSECUTIVE_JOINER_CAP,
   LINGUISTIC_SCRIPTS,
 } from "../src/invisible.mjs";
+import { applyLayer1 } from "../src/layer1.mjs";
 import { fcRunOptions, cp } from "./test-helpers.mjs";
 
 const ZWNJ = cp(0x200c);
@@ -251,19 +254,32 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
 
   // The scatter floor (SCATTERED_THRESHOLD = 30) is the boundary: 29 invisibles
   // keep the carve-out enabled, 30 disable it wholesale. Both sides are pinned
-  // so a `<`→`<=`/`>` mutant can't survive.
+  // so a `<`→`<=`/`>` mutant can't survive. Each joiner sits in its OWN word
+  // (`letter ZWNJ letter` separated by spaces) so the consecutive-joiner cap
+  // resets per word and never confounds the scatter-floor boundary being tested.
   it(`keeps legit joiners just under the scatter floor (${SCATTERED_THRESHOLD - 1})`, () => {
-    const input =
-      (cp(0x645) + ZWNJ).repeat(SCATTERED_THRESHOLD - 1) + cp(0x62e);
+    const word = cp(0x645) + ZWNJ + cp(0x62e);
+    const input = Array.from(
+      { length: SCATTERED_THRESHOLD - 1 },
+      () => word,
+    ).join(" ");
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, input);
     assert.deepEqual(found, []);
   });
 
   it("strips ALL joiners once the scatter floor is reached, even legit ones", () => {
-    const input = (cp(0x645) + ZWNJ).repeat(SCATTERED_THRESHOLD) + cp(0x62e);
+    const word = cp(0x645) + ZWNJ + cp(0x62e);
+    const stripped = cp(0x645) + cp(0x62e);
+    const input = Array.from({ length: SCATTERED_THRESHOLD }, () => word).join(
+      " ",
+    );
+    const expected = Array.from(
+      { length: SCATTERED_THRESHOLD },
+      () => stripped,
+    ).join(" ");
     const { cleaned, found } = stripInvisibleWithReport(input);
-    assert.equal(cleaned, cp(0x645).repeat(SCATTERED_THRESHOLD) + cp(0x62e));
+    assert.equal(cleaned, expected);
     assert.deepEqual(found, [CATEGORY.CF]);
   });
 
@@ -310,6 +326,18 @@ describe("isSgrOnly", () => {
     assert.equal(isSgrOnly(`${cp(0x1b)}[`), false));
   it("SGR_RE matches a color sequence", () =>
     assert.equal(`${cp(0x1b)}[31mx`.replace(SGR_RE, ""), "x"));
+
+  // C1 (8-bit) encodings: a single U+009B (CSI) stands in for `ESC [`. isSgrOnly
+  // must judge these exactly as their 7-bit twins, never letting a C1 introducer
+  // pass unseen (the bug: an ESC-only test was blind to U+009B).
+  it("is true for a C1-introduced SGR color sequence", () =>
+    assert.equal(isSgrOnly(`${cp(0x9b)}31mhi${cp(0x9b)}0m`), true));
+  it("is false for a C1-introduced cursor move", () =>
+    assert.equal(isSgrOnly(`${cp(0x9b)}2J`), false));
+  it("is false for a lone C1 CSI introducer", () =>
+    assert.equal(isSgrOnly(cp(0x9b)), false));
+  it("SGR_RE matches a C1-introduced color sequence", () =>
+    assert.equal(`${cp(0x9b)}31mx`.replace(SGR_RE, ""), "x"));
 });
 
 // ─── LONG_RUN_RE ─────────────────────────────────────────────────────────────
@@ -324,6 +352,171 @@ describe("LONG_RUN_RE", () => {
     assert.equal(
       LONG_RUN_RE.test(cp(0x200b).repeat(LONG_RUN_THRESHOLD - 1)),
       false,
+    );
+  });
+});
+
+// ─── Zero-width combining marks (Mn) ─────────────────────────────────────────
+// These render with no advance width yet are category Mn, so \p{Cf} misses them
+// and only the enumerated ZERO_WIDTH_MN set catches them. One case per member
+// (drive off the SSOT so a dropped entry fails here), plus a guard that a
+// VISIBLE combining mark is never swept.
+describe("zero-width Mn marks", () => {
+  for (const ch of ZERO_WIDTH_MN) {
+    const hex = ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+    it(`strips zero-width Mn mark U+${hex}`, () => {
+      const { cleaned, found } = stripInvisibleWithReport(`a${ch}b`);
+      assert.equal(cleaned, "ab");
+      assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
+    });
+  }
+
+  it("every ZERO_WIDTH_MN member is part of BLANK_NON_CF", () => {
+    for (const ch of ZERO_WIDTH_MN) assert.ok(BLANK_NON_CF.includes(ch));
+  });
+
+  // U+0301 COMBINING ACUTE ACCENT has visible width — it must be left intact;
+  // only zero-advance Mn marks are payload-capable.
+  it("preserves a visible combining mark (U+0301)", () => {
+    const input = `e${cp(0x0301)}`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+  });
+});
+
+// ─── Consecutive-joiner cap (hidden-channel collapse) ────────────────────────
+// An attacker alternates `letter joiner letter joiner …` so every joiner is, in
+// isolation, in a "linguistic" context AND the total stays under the scatter
+// floor — a multi-bit zero-width channel that survived both clean and scan. The
+// cap collapses it: at most CONSECUTIVE_JOINER_CAP joiners survive in one
+// uninterrupted joined run, the surplus stripped as payload.
+describe("consecutive-joiner cap", () => {
+  const AR1 = cp(0x645);
+  const AR2 = cp(0x62e);
+  const countOf = (s, ch) => s.split(ch).length - 1;
+
+  it(`caps preserved ZWNJ in an alternating Arabic run at ${CONSECUTIVE_JOINER_CAP}`, () => {
+    const input = (AR1 + ZWNJ).repeat(CONSECUTIVE_JOINER_CAP + 12) + AR2;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(countOf(cleaned, ZWNJ), CONSECUTIVE_JOINER_CAP);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it(`caps preserved ZWJ in an alternating emoji run at ${CONSECUTIVE_JOINER_CAP}`, () => {
+    const input =
+      cp(0x1f468) + (ZWJ + cp(0x1f469)).repeat(CONSECUTIVE_JOINER_CAP + 12);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(countOf(cleaned, ZWJ), CONSECUTIVE_JOINER_CAP);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("preserves exactly CONSECUTIVE_JOINER_CAP joiners (boundary, none stripped)", () => {
+    const input = (AR1 + ZWNJ).repeat(CONSECUTIVE_JOINER_CAP) + AR2;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+  });
+
+  it("a single linguistic joiner per word is preserved (cap resets at a gap)", () => {
+    const word = AR1 + ZWNJ + AR2;
+    const input = `${word} ${word} ${word}`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+  });
+
+  it("the four-person family emoji (3 ZWJ) is under the cap and preserved", () => {
+    const { cleaned, found } = stripInvisibleWithReport(FAMILY);
+    assert.equal(cleaned, FAMILY);
+    assert.deepEqual(found, []);
+    assert.equal(countOf(cleaned, ZWJ), 3);
+  });
+});
+
+// ─── Layer 1: OSC strings + C1 sequences (no payload survives) ────────────────
+// OSC strings carry attacker-controlled text (titles, hyperlink URLs) between an
+// introducer and a terminator. The fix consumes the WHOLE string for every
+// terminator form (ST `ESC\`, C1 ST U+009C, legacy BEL) and for the 8-bit C1
+// OSC introducer, and drops an unterminated introducer's remainder (fail-closed).
+describe("applyLayer1: OSC strings and C1 sequences", () => {
+  const ESC = cp(0x1b);
+  const BEL = cp(0x07);
+  const ST = ESC + "\\";
+  const C1_ST = cp(0x9c);
+  const C1_OSC = cp(0x9d);
+  const C1_CSI = cp(0x9b);
+
+  for (const [name, input, expected] of [
+    [
+      "OSC title terminated by ST (ESC\\)",
+      `before${ESC}]0;TITLE${ST}after`,
+      "beforeafter",
+    ],
+    [
+      "OSC title terminated by C1 ST",
+      `before${ESC}]0;TITLE${C1_ST}after`,
+      "beforeafter",
+    ],
+    [
+      "OSC title terminated by BEL",
+      `before${ESC}]0;TITLE${BEL}after`,
+      "beforeafter",
+    ],
+    [
+      "OSC hyperlink (URL payload) terminated by ST",
+      `${ESC}]8;;https://evil/leak${ST}`,
+      "",
+    ],
+    ["unterminated OSC consumes to end-of-string", `${ESC}]0;UNTERMINATED`, ""],
+    [
+      "C1 OSC introducer (U+009D) terminated by C1 ST",
+      `x${C1_OSC}0;SECRET${C1_ST}y`,
+      "xy",
+    ],
+    ["C1 OSC introducer terminated by ST", `x${C1_OSC}0;SECRET${ST}y`, "xy"],
+    ["C1 CSI SGR color sequence", `a${C1_CSI}31mred${C1_CSI}0mb`, "aredb"],
+    ["C1 CSI cursor/erase sequence", `a${C1_CSI}2Jb`, "ab"],
+  ]) {
+    it(`removes the whole sequence: ${name}`, () => {
+      const { cleaned } = applyLayer1(input);
+      assert.equal(cleaned, expected);
+    });
+  }
+
+  it("leaves no raw control introducer for any of the OSC/C1 cases", () => {
+    for (const input of [
+      `${ESC}]0;t${ST}`,
+      `${ESC}]0;t${C1_ST}`,
+      `${ESC}]0;t${BEL}`,
+      `${ESC}]0;unterminated`,
+      `${C1_OSC}0;t${C1_ST}`,
+      `${C1_CSI}31mx${C1_CSI}0m`,
+    ]) {
+      const { cleaned } = applyLayer1(input);
+      assert.ok(!cleaned.includes(cp(0x1b)), "ESC survived");
+      assert.ok(!cleaned.includes(cp(0x9b)), "C1 CSI survived");
+      assert.ok(!cleaned.includes(cp(0x9d)), "C1 OSC survived");
+    }
+  });
+
+  // The deliberate bounded-intro / negated-body design keeps the ANSI grammar
+  // linear; an adversarial never-completing string must not blow up. Assert the
+  // work scales ~linearly (not super-linearly) with input size.
+  it("OSC/CSI stripping stays ~linear on adversarial never-terminating input", () => {
+    const time = (n) => {
+      const input = `${ESC}]` + ";".repeat(n) + `${ESC}[` + ";#".repeat(n);
+      const t0 = process.hrtime.bigint();
+      applyLayer1(input);
+      return Number(process.hrtime.bigint() - t0);
+    };
+    // Warm up, then compare 10x size: linear ⇒ ratio well under quadratic (100x).
+    time(2000);
+    const small = Math.max(time(20000), 1);
+    const big = time(200000);
+    assert.ok(
+      big / small < 40,
+      `super-linear scaling: ${small}ns -> ${big}ns (ratio ${(big / small).toFixed(1)})`,
     );
   });
 });
@@ -456,6 +649,58 @@ describe("property: stripInvisible invariants", () => {
             code === 0x200c || code === 0x200d || (code === 0xfeff && i === 0);
           assert.ok(ok, `unexpected residual invisible U+${code.toString(16)}`);
         }
+      }),
+      fcRunOptions(),
+    );
+  });
+});
+
+// applyLayer1 over a domain that ALSO includes raw ANSI introducers/terminators
+// (ESC, C1 CSI/OSC/ST, BEL, `[`, `]`, `;`, `m`) so the property exercises the
+// OSC/CSI grammar, not just invisible chars.
+const ansiChar = fc.constantFrom(
+  cp(0x1b),
+  cp(0x9b),
+  cp(0x9c),
+  cp(0x9d),
+  cp(0x07),
+  "[",
+  "]",
+  ";",
+  "m",
+  "0",
+);
+const layer1Text = fc
+  .array(fc.oneof(adversarialChar, ansiChar), { maxLength: 80 })
+  .map((parts) => parts.join(""));
+
+describe("property: applyLayer1 invariants", () => {
+  it("never throws on adversarial ANSI + invisible + surrogate input", () => {
+    fc.assert(
+      fc.property(layer1Text, (text) => {
+        const { cleaned } = applyLayer1(text);
+        assert.equal(typeof cleaned, "string");
+      }),
+      fcRunOptions(),
+    );
+  });
+
+  it("no raw ANSI control introducer (ESC / C1 CSI) survives, for any input", () => {
+    fc.assert(
+      fc.property(layer1Text, (text) => {
+        const { cleaned } = applyLayer1(text);
+        assert.ok(!cleaned.includes(cp(0x1b)), "ESC survived");
+        assert.ok(!cleaned.includes(cp(0x9b)), "C1 CSI survived");
+      }),
+      fcRunOptions(),
+    );
+  });
+
+  it("is idempotent: applyLayer1(applyLayer1(x)) === applyLayer1(x)", () => {
+    fc.assert(
+      fc.property(layer1Text, (text) => {
+        const once = applyLayer1(text).cleaned;
+        assert.equal(applyLayer1(once).cleaned, once);
       }),
       fcRunOptions(),
     );
