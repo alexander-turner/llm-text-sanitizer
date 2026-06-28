@@ -374,6 +374,11 @@ export function spliceRanges(text, ranges) {
     const last = merged[merged.length - 1];
     if (last && range.start < last.end) {
       if (range.end > last.end) last.end = range.end;
+      // A hidden range absorbed into a comment range (the comment sorts first
+      // on a tie) must keep the hidden label — hidden content placeholdered as
+      // "[HTML comment removed]" would understate what was stripped. Hidden
+      // dominates: if either side is hidden, the union is hidden.
+      if (range.kind === "hidden") last.kind = "hidden";
     } else {
       merged.push({ ...range });
     }
@@ -462,35 +467,82 @@ export function scanHtmlFragment(html) {
 
 const mdParser = unified().use(remarkParse).use(remarkGfm);
 
+// A markup-declaration-open (`<!`) or processing-instruction-ish (`<?`) start.
+// Inside an inline html node these begin a *bogus comment* unless they open a
+// proper `<!--…-->` comment (handled on the fast path) — `<!bogus>`, `<?php?>`,
+// `<![CDATA[…]]>` all tokenize to comments the HTML-source branch already
+// strips. The prose branch matched only literal `<!--`, so the bogus forms
+// leaked through; this finds the candidates to validate.
+const BOGUS_COMMENT_OPEN_RE = /<[!?]/g;
+
+/**
+ * If `value.slice(at)` begins with an HTML comment (proper or bogus), return
+ * the comment's end offset *within `value`* (exclusive); else null. Validated
+ * against the real HTML tokenizer rather than a hand-rolled bogus-comment state
+ * machine, so we splice exactly what a browser would hide and never a `<Foo>`
+ * element, a `<!doctype>`, or visible prose.
+ * @param {string} value
+ * @param {number} at offset of a candidate `<!`/`<?` within `value`
+ * @returns {number | null}
+ */
+function bogusCommentEnd(value, at) {
+  const tree = /** @type {any} */ (
+    unified().use(rehypeParse, { fragment: true }).parse(value.slice(at))
+  );
+  // The slice starts at the candidate `<!`/`<?`, and an inline html node value
+  // is a single construct, so the first parsed child IS that construct: a
+  // `comment` node iff it tokenized to a (bogus) comment. A `<Foo>` element, a
+  // `<!doctype>` (dropped, leaving following text), or nothing else qualifies.
+  const first = tree.children[0];
+  if (!first || first.type !== "comment") return null;
+  return at + first.position.end.offset;
+}
+
 /**
  * Append comment ranges found in `value` to `ranges`.
  *
- * indexOf scanning is linear (a lazy `<!--[\s\S]*?-->` regex backtracks
- * polynomially on crafted input); the close search starts 2 chars in so
- * spec-abrupt closes (`<!-->`, `<!--->`) terminate their own comment.
+ * Proper `<!--…-->` comments are located with linear indexOf scanning (a lazy
+ * `<!--[\s\S]*?-->` regex backtracks polynomially on crafted input); the close
+ * search starts 2 chars in so spec-abrupt closes (`<!-->`, `<!--->`) terminate
+ * their own comment. Other `<!`/`<?` starts are bogus comments, spliced to the
+ * exact span the HTML tokenizer assigns them so the prose branch reaches parity
+ * with the HTML-source branch (which strips them via parse5).
  * @param {string} value
  * @param {number} base absolute offset of the start of `value`
  * @param {number} nodeEnd absolute offset of the end of the containing node
  * @param {Array<{start: number, end: number, kind: "comment" | "hidden"}>} ranges
  */
 function collectCommentRanges(value, base, nodeEnd, ranges) {
-  for (let searchFrom = 0; ;) {
-    const open = value.indexOf("<!--", searchFrom);
-    if (open === -1) break;
-    const close = value.indexOf("-->", open + 2);
-    /* c8 ignore start -- micromark only tokenizes inline comments WITH a
-       terminator (an unterminated `<!--` in phrasing context stays literal
-       text, visible to a human reader), so this is fail-closed
-       defense-in-depth against a future tokenizer change. Unterminated
-       comments in flow blocks are covered — parse5 handles them in
-       scanHtmlFragment. */
-    if (close === -1) {
-      ranges.push({ start: base + open, end: nodeEnd, kind: "comment" });
-      break;
+  BOGUS_COMMENT_OPEN_RE.lastIndex = 0;
+  for (let match; (match = BOGUS_COMMENT_OPEN_RE.exec(value));) {
+    const open = match.index;
+    if (value.startsWith("<!--", open)) {
+      const close = value.indexOf("-->", open + 2);
+      /* c8 ignore start -- micromark only tokenizes inline comments WITH a
+         terminator (an unterminated `<!--` in phrasing context stays literal
+         text, visible to a human reader), so this is fail-closed
+         defense-in-depth against a future tokenizer change. Unterminated
+         comments in flow blocks are covered — parse5 handles them in
+         scanHtmlFragment. */
+      if (close === -1) {
+        ranges.push({ start: base + open, end: nodeEnd, kind: "comment" });
+        break;
+      }
+      /* c8 ignore stop */
+      ranges.push({
+        start: base + open,
+        end: base + close + 3,
+        kind: "comment",
+      });
+      BOGUS_COMMENT_OPEN_RE.lastIndex = close + 3;
+      continue;
     }
-    /* c8 ignore stop */
-    ranges.push({ start: base + open, end: base + close + 3, kind: "comment" });
-    searchFrom = close + 3;
+    const end = bogusCommentEnd(value, open);
+    // Not a comment (a `<Foo>` element, a `<!doctype>`, visible prose): leave
+    // it untouched and resume scanning just past this `<`.
+    if (end === null) continue;
+    ranges.push({ start: base + open, end: base + end, kind: "comment" });
+    BOGUS_COMMENT_OPEN_RE.lastIndex = end;
   }
 }
 
@@ -668,19 +720,29 @@ export function sanitizeHtml(text) {
 
 // ─── Layer 3: markdown/URL exfiltration detection ────────────────────────────
 
-// High-precision raw-string indicators, applied to the whole URL so they fire
-// even when it is too malformed for `new URL()` to parse (e.g. a non-ASCII
-// host). The `#` in the delimiter class extends keyword detection to the
-// fragment, an exfil channel the param walk would otherwise miss (`…#token=…`).
-// The generic "long base64/hex value" arm that once lived here moved into the
-// per-parameter walk (paramExfilReason) so it can skip request-signing,
-// pagination, and analytics parameters that legitimately carry long opaque
-// values — see BENIGN_BLOB_PARAM_RE.
-const EXFIL_INDICATORS = [
-  /[?&#](?:data|d|payload|exfil|leak|steal|secret|token|key|env|password|pwd|cookie|session|auth)=/i,
-  /\$\{[^{}]+\}/,
-  /\{\{[^{}]+\}\}/,
-];
+// Template-injection indicators, applied to the whole URL so they fire even
+// when it is too malformed for `new URL()` to parse (e.g. a non-ASCII host).
+// These are name-independent shapes — server-/client-side template syntax that
+// only appears in a URL when something is interpolating untrusted data — so
+// they carry signal on their own and need no value-shape gate.
+//
+// Keyword-PARAM detection (`?token=…`, `…#secret=…`) was REMOVED from this list
+// (finding #20): firing on the parameter NAME alone flagged every `?session=ok`
+// / `?key=pk_public_mapkey` / `?d=3`, drowning the real signal. A keyword
+// param is now flagged only when its VALUE is payload-shaped, via the
+// value-gated raw scan below (rawUrlKeywordExfil) which reuses the same
+// blob/credential shape test as the post-parse param walk — see
+// paramExfilReason. The raw scan keeps the pre-parse / fragment coverage the
+// old name arm had (an unparseable host means `new URL()` throws and the
+// post-parse walk never runs).
+const EXFIL_INDICATORS = [/\$\{[^{}]+\}/, /\{\{[^{}]+\}\}/];
+
+// Parameter NAMES whose presence used to flag on sight; now they only gate
+// WHICH raw params the value-shape test is applied to before the URL is parsed.
+// Kept narrow (the historically over-eager set) so the raw pre-parse pass stays
+// cheap; any non-keyword param is still value-gated post-parse by the walk.
+const KEYWORD_PARAM_NAME_RE =
+  /^(?:data|d|payload|exfil|leak|steal|secret|token|key|env|password|pwd|cookie|session|auth)$/i;
 
 const LONG_QUERY_THRESHOLD = 200;
 
@@ -787,6 +849,32 @@ function paramExfilReason(name, value) {
 }
 
 /**
+ * Pre-parse, value-GATED keyword-parameter scan over the RAW URL string. Splits
+ * off the query (`?…`) and fragment (`#…`) and applies the same blob/credential
+ * value-shape test as the post-parse walk, but only to keyword-named params
+ * (KEYWORD_PARAM_NAME_RE). This is the precision fix for finding #20: a keyword
+ * param flags only when its value is actually payload-shaped, so `?session=ok`
+ * and `?key=pk_public_mapkey` no longer fire. It runs BEFORE `new URL()` so a
+ * blob in an unparseable-host URL (which the post-parse walk never reaches) is
+ * still caught, preserving the coverage the old name-only arm had.
+ * @param {string} url
+ * @returns {string | null}
+ */
+function rawUrlKeywordExfil(url) {
+  // Strip the scheme+authority+path prefix: everything up to the first `?`/`#`.
+  const qIdx = url.search(/[?#]/);
+  if (qIdx === -1) return null;
+  for (const segment of url.slice(qIdx + 1).split("#")) {
+    for (const [name, value] of rawParams(segment)) {
+      if (!KEYWORD_PARAM_NAME_RE.test(name)) continue;
+      const reason = paramExfilReason(name, value);
+      if (reason) return reason;
+    }
+  }
+  return null;
+}
+
+/**
  * True when every parameter of the parsed URL's query is in the benign
  * allowlist. Used to suppress the coarse long-query-string heuristic for
  * signed-CDN links, which are long by design. Only ever called once the query
@@ -848,6 +936,10 @@ export function checkExfilUrl(url) {
   if (SCRIPT_URI_RE.test(url)) return "script-executing URI";
   if (EXFIL_INDICATORS.some((pattern) => pattern.test(url)))
     return "suspicious query parameter";
+  // Value-gated keyword params, scanned on the RAW string so a blob in an
+  // unparseable-host URL is caught before `new URL()` would throw.
+  const keywordReason = rawUrlKeywordExfil(url);
+  if (keywordReason) return keywordReason;
   // Userinfo and an oversized fragment are exfil channels the param walk misses:
   // credentials smuggled as `user:secret@host`, or a payload tucked in `#<blob>`.
   // Parse against a sentinel base so relative URLs don't throw.

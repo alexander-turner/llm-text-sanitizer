@@ -5,7 +5,9 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fc from "fast-check";
 
+import { fcRunOptions } from "./test-helpers.mjs";
 import {
   sanitizeHtml,
   detectExfil,
@@ -452,6 +454,28 @@ describe("unit: spliceRanges exact behavior", () => {
     ));
   it("returns the text unchanged for no ranges", () =>
     assert.equal(spliceRanges(text, []), text));
+  it("a hidden range merged into a comment range keeps the hidden label (#21)", () =>
+    // The comment sorts first on the start tie, so the naive merge kept its
+    // kind and labeled the union "[HTML comment removed]" — understating that
+    // actively-hidden content was stripped. Hidden must dominate the union.
+    assert.equal(
+      spliceRanges(text, [
+        { start: 2, end: 5, kind: "comment" },
+        { start: 4, end: 8, kind: "hidden" },
+      ]),
+      `01${HIDDEN_PLACEHOLDER}89`,
+    ));
+  it("hidden dominates an equal-start comment that sorts first (#21)", () =>
+    // Equal starts sort by end ascending, so the SHORT comment range becomes
+    // `last` and the longer hidden range is absorbed into it — the kind must
+    // still flip to hidden.
+    assert.equal(
+      spliceRanges(text, [
+        { start: 2, end: 4, kind: "comment" },
+        { start: 2, end: 7, kind: "hidden" },
+      ]),
+      `01${HIDDEN_PLACEHOLDER}789`,
+    ));
 });
 
 describe("unit: scanHtmlFragment exact verdicts", () => {
@@ -690,8 +714,140 @@ describe("splice fidelity and regressions", () => {
       ),
       "embedded credentials",
     ));
-  it("flags a keyword exfil parameter in the fragment", () =>
-    assert.notEqual(checkExfilUrl("https://ok.example/#token=abc"), null));
+  it("flags a payload-shaped keyword param in the fragment", () =>
+    assert.notEqual(
+      checkExfilUrl(`https://ok.example/#token=${"a".repeat(64)}`),
+      null,
+    ));
+  it("does not flag a SHORT keyword fragment param on its name alone (#20)", () =>
+    assert.equal(checkExfilUrl("https://ok.example/#token=abc"), null));
   it("leaves a benign fragment anchor alone", () =>
     assert.equal(checkExfilUrl("https://ok.example/page#section-2"), null));
+});
+
+// ─── Bogus-comment parity (finding: prose branch matched only `<!--`) ─────────
+//
+// The HTML-source branch (parse5/rehype) strips not just proper comments but the
+// HTML tokenizer's *bogus comments* (`<!…>` that is not a comment/doctype,
+// `<?…>`, `<![CDATA[…]]>`). The prose/markdown branch used to scan literal
+// `<!--` only, so the bogus forms survived. These cases pin the parity AND, more
+// importantly, prove ordinary prose stays BYTE-FOR-BYTE untouched — the
+// false-positive risk a hand-rolled bogus-comment scanner would carry.
+describe("bogus-comment parity in the prose branch", () => {
+  // A `<!` form alone passes the HTML_TAG_PRESENT gate; a `<?` form alone does
+  // not, so it is paired with a `<!` to exercise the `<?` arm of the scan.
+  const SPLICED = [
+    {
+      name: "bogus <!declaration>",
+      input: "text <!bogus secret> OK",
+      want: `text ${COMMENT_PLACEHOLDER} OK`,
+    },
+    {
+      name: "CDATA section",
+      input: "note <![CDATA[ secret ]]> end",
+      want: `note ${COMMENT_PLACEHOLDER} end`,
+    },
+    {
+      name: "processing instruction (paired with a <! to clear the gate)",
+      input: "x <!a> and <?php evil ?> y",
+      want: `x ${COMMENT_PLACEHOLDER} and ${COMMENT_PLACEHOLDER} y`,
+    },
+    {
+      name: "a proper comment beside a bogus one",
+      input: "x <!bogus> y <!-- c --> z",
+      want: `x ${COMMENT_PLACEHOLDER} y ${COMMENT_PLACEHOLDER} z`,
+    },
+  ];
+  for (const { name, input, want } of SPLICED)
+    it(`splices ${name}`, () => assert.equal(applyHtml(input), want));
+
+  // The precision counter-examples. Every one of these is visible text a browser
+  // renders; not a single byte may be touched. (Several never produce an inline
+  // html node at all — micromark leaves them literal — which is exactly why the
+  // scan is safe; the assertion pins that end-to-end.)
+  const UNTOUCHED = [
+    "a < b",
+    "x<3",
+    "if (x<y) {",
+    "1<2 && 3>2",
+    "<not a tag",
+    "a bare < here",
+    "see <https://example.com> for more",
+    "use the `<Foo>` component in a code span",
+    "<Foo>visible element body</Foo>",
+    "a doctype <!DOCTYPE html> is dropped by the parser, not spliced",
+  ];
+  for (const input of UNTOUCHED)
+    it(`leaves ${JSON.stringify(input)} byte-for-byte`, () =>
+      assert.equal(applyHtml(input), input));
+});
+
+// ─── looksLikeHtmlSource branch-parity (finding #2) ──────────────────────────
+//
+// `sanitizeHtml` routes through one of two scanners — `scanHtmlFragment`
+// (parse5, when `looksLikeHtmlSource` is true) or `scanMarkdown` (remark, the
+// prose branch) — based on a coarse 30%-of-lines heuristic. After the
+// bogus-comment parity fix, the SAME hidden/bogus construct must be stripped no
+// matter which branch the heuristic happens to pick; otherwise an attacker tunes
+// the surrounding line-shape to dodge whichever branch is weaker. This property
+// embeds one construct (carrying a canary) in BOTH a tag-dense doc (forces the
+// source branch) and a prose doc (forces the markdown branch) and asserts the
+// canary dies in both while a visible marker survives in both.
+describe("property: hidden/bogus content is stripped on either branch (#2)", () => {
+  const CANARY = "CANARY_PARITY";
+  const MARKER = "VISIBLE_MARKER";
+
+  // Each builds a fragment that hides CANARY; the HTML-source branch already
+  // strips all of these, so the property pins the prose branch up to parity.
+  const hiddenConstruct = fc.constantFrom(
+    `<!-- ${CANARY} -->`,
+    `<!bogus ${CANARY}>`,
+    `<![CDATA[${CANARY}]]>`,
+    `<span style="display:none">${CANARY}</span>`,
+    `<div hidden>${CANARY}</div>`,
+    `<span aria-hidden="true">${CANARY}</span>`,
+  );
+
+  it("the canary never survives, the visible marker always does", () => {
+    let sawSourceBranch = 0;
+    let sawProseBranch = 0;
+    fc.assert(
+      fc.property(hiddenConstruct, (construct) => {
+        // Tag-dense doc: ≥5 lines, >30% tag-shaped → source branch.
+        const sourceDoc = [
+          "<section>",
+          "<p>intro</p>",
+          `<p>${MARKER}</p>`,
+          construct,
+          "<p>outro</p>",
+          "</section>",
+        ].join("\n");
+        // Prose doc: a single paragraph of plain text → markdown branch.
+        const proseDoc = `Here is ${MARKER} then ${construct} and more prose.`;
+
+        assert.equal(looksLikeHtmlSource(sourceDoc), true);
+        assert.equal(looksLikeHtmlSource(proseDoc), false);
+        if (looksLikeHtmlSource(sourceDoc)) sawSourceBranch += 1;
+        if (!looksLikeHtmlSource(proseDoc)) sawProseBranch += 1;
+
+        for (const doc of [sourceDoc, proseDoc]) {
+          const out = applyHtml(doc);
+          assert.equal(
+            out.includes(CANARY),
+            false,
+            `canary survived: ${JSON.stringify(doc)} -> ${JSON.stringify(out)}`,
+          );
+          assert.ok(
+            out.includes(MARKER),
+            `visible marker lost: ${JSON.stringify(doc)} -> ${JSON.stringify(out)}`,
+          );
+        }
+      }),
+      fcRunOptions({ numRuns: 200 }),
+    );
+    assert.ok(
+      sawSourceBranch > 0 && sawProseBranch > 0,
+      "a branch was never exercised",
+    );
+  });
 });
