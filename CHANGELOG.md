@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.2.8] - 2026-06-28
+
+### Fixed
+- Fixed npm package to stop shipping build artifacts, resolving issues with consumer installations.
+- Fixed worker-mode buffering to respect the input size cap on a per-line basis.
+
 ## [1.2.6] - 2026-06-28
 
 ### Fixed
