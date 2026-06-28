@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.2.5] - 2026-06-28
+
+### Fixed
+
+- Strip bogus comments in prose and value-gate keyword exfiltration parameters in HTML processing.
+
 ## [1.2.3] - 2026-06-28
 
 ### Fixed
