@@ -124,6 +124,27 @@ describe("foldConfusables", () => {
     ];
     assert.equal(foldConfusables(text, findings), "ao");
   });
+
+  it("throws when a finding's char does not match the bytes at its index", () => {
+    // Adversarial scanner: claims a 2-char glyph "аа" at index 1 of "/xyz".
+    // Splicing blindly would corrupt to "/Zz"; the guard must fail loud instead.
+    assert.throws(
+      () =>
+        foldConfusables("/xyz", [
+          { index: 1, char: `${CYR_A}${CYR_A}`, latinEquivalent: "Z" },
+        ]),
+      /does not match input at index 1/,
+    );
+  });
+
+  it("does not throw when a correct finding matches the bytes at its index", () => {
+    assert.equal(
+      foldConfusables(`/${CYR_A}`, [
+        { index: 1, char: CYR_A, latinEquivalent: "a" },
+      ]),
+      "/a",
+    );
+  });
 });
 
 // ─── normalizeConfusables: folding positive cases ────────────────────────────
@@ -179,20 +200,38 @@ describe("normalizeConfusables: folding", () => {
     });
   }
 
-  // Each handled tool folds its own path/command field — and only that one.
-  for (const [tool, field] of Object.entries(DEFAULT_FIELDS)) {
-    it(`folds the ${field[0]} field of ${tool}`, () => {
-      const key = field[0];
-      const result = normalizeConfusables(
-        tool,
-        { [key]: `/p${CYR_A}th` },
-        { scan },
-      );
-      assert.deepEqual(result, {
-        updatedInput: { [key]: "/path" },
-        normalized: [`${key} (U+0430 → "a")`],
-      });
+  // The read/search/list tools must be covered: a Cyrillic homoglyph in a
+  // Grep/Glob pattern is exactly the CVE-2025-54794 cross-script deny-rule
+  // bypass this module exists to close. Pin the required (tool → fields) set so
+  // dropping any of them from DEFAULT_FIELDS fails here, not silently.
+  for (const [tool, expectedFields] of [
+    ["Grep", ["pattern", "path"]],
+    ["Glob", ["pattern", "path"]],
+    ["Read", ["file_path"]],
+    ["LS", ["path"]],
+  ]) {
+    it(`covers ${tool} with fields ${expectedFields.join(", ")}`, () => {
+      assert.deepEqual(DEFAULT_FIELDS[tool], expectedFields);
     });
+  }
+
+  // SSOT-driven: every field of every tool in DEFAULT_FIELDS must be folded.
+  // Iterating per (tool, field) means adding a tool/field without a test is
+  // impossible — the loop generates a case for it automatically.
+  for (const [tool, fieldList] of Object.entries(DEFAULT_FIELDS)) {
+    for (const key of fieldList) {
+      it(`folds the ${key} field of ${tool}`, () => {
+        const result = normalizeConfusables(
+          tool,
+          { [key]: `/p${CYR_A}th` },
+          { scan },
+        );
+        assert.deepEqual(result, {
+          updatedInput: { [key]: "/path" },
+          normalized: [`${key} (U+0430 → "a")`],
+        });
+      });
+    }
   }
 
   it("names each fold (code point → ASCII) so a broken legit path is explainable", () => {

@@ -35,6 +35,9 @@ export const DEFAULT_FIELDS = {
   Read: ["file_path"],
   MultiEdit: ["file_path"],
   NotebookEdit: ["notebook_path"],
+  Grep: ["pattern", "path"],
+  Glob: ["pattern", "path"],
+  LS: ["path"],
 };
 
 /**
@@ -95,11 +98,21 @@ function describeFolds(findings) {
  */
 export function foldConfusables(text, findings) {
   let folded = text;
-  for (const finding of [...findings].sort((lhs, rhs) => rhs.index - lhs.index))
+  for (const finding of [...findings].sort(
+    (lhs, rhs) => rhs.index - lhs.index,
+  )) {
+    // Fail loud on a finding that does not match the actual bytes at its offset:
+    // a buggy/adversarial scanner reporting a wrong char/index would otherwise
+    // silently corrupt the path/command, defeating the deny-rule protection.
+    if (!folded.startsWith(finding.char, finding.index))
+      throw new Error(
+        `Confusable finding does not match input at index ${finding.index}: expected ${JSON.stringify(finding.char)}`,
+      );
     folded =
       folded.slice(0, finding.index) +
       finding.latinEquivalent +
       folded.slice(finding.index + finding.char.length);
+  }
   return folded;
 }
 

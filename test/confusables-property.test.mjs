@@ -134,6 +134,32 @@ describe("foldConfusables (property)", () => {
       assert.equal(foldConfusables(once, scan(once).findings), once);
     });
   });
+
+  it("is a no-op on all-ASCII input (an honest scanner flags nothing)", () => {
+    const asciiText = fc
+      .array(fc.integer({ min: 0x20, max: 0x7e }), { maxLength: 60 })
+      .map((codes) => codes.map((c) => String.fromCharCode(c)).join(""));
+    check(asciiText, (t) => {
+      assert.equal(foldConfusables(t, scan(t).findings), t);
+    });
+  });
+
+  it("throws when a finding's char does not match the bytes at its index", () => {
+    // Build an honest finding, then corrupt its char so it no longer matches the
+    // input at the reported offset: the fail-loud guard must reject it anywhere.
+    const withConfusable = text.filter((t) => scan(t).findings.length > 0);
+    check(withConfusable, (t) => {
+      const findings = scan(t).findings;
+      const corrupted = findings.map((f) => ({
+        ...f,
+        char: `/${f.char}`, // prefix the char so startsWith(char, index) fails
+      }));
+      assert.throws(
+        () => foldConfusables(t, corrupted),
+        /does not match input at index/,
+      );
+    });
+  });
 });
 
 describe("normalizeConfusables (property)", () => {
@@ -164,7 +190,7 @@ describe("normalizeConfusables (property)", () => {
   it("ignores tools with no mapped field", () => {
     check(text, (value) =>
       assert.equal(
-        normalizeConfusables("Grep", { pattern: value }, { scan }),
+        normalizeConfusables("WebSearch", { query: value }, { scan }),
         null,
       ),
     );

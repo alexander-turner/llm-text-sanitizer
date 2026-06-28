@@ -8,6 +8,11 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.2.1] - 2026-06-28
+
+### Fixed
+- Fold search/list tool fields in confusables and fail loudly on scanner offset mismatch
+
 ## [1.2.0] - 2026-06-23
 
 ### Changed
