@@ -23,11 +23,17 @@ Entry points:
 * :class:`Sanitizer` — an explicitly-scoped long-lived worker (context manager).
 * :func:`shutdown_worker` — tear down the shared worker eagerly (it is also torn
   down at interpreter exit).
+
+The CLI caps a single request at ``AGENT_SANITIZER_MAX_INPUT_BYTES`` UTF-8 bytes
+(default 10 MiB); a larger request fails with a clear error instead of buffering
+an unbounded payload. Set that environment variable in the calling process to
+raise or lower the limit.
 """
 
 import atexit
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -125,6 +131,23 @@ def _check(response: dict) -> dict:
     return response
 
 
+def _parse_cli_json(output: str) -> dict:
+    """Parse one line of CLI stdout as JSON, wrapping a non-JSON line in a clear
+    error that names the offending output and that it came from the sanitizer CLI.
+
+    Without this, a Node crash or a stray ``console.log`` in the CLI surfaces as
+    a bare ``json.decoder.JSONDecodeError`` with no hint of where the bad bytes
+    came from.
+    """
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError as cause:
+        raise RuntimeError(
+            "sanitize CLI returned non-JSON output (expected one JSON object): "
+            f"{output.strip()!r}"
+        ) from cause
+
+
 def _oneshot(request: dict, node: str) -> dict:
     """One request through a fresh CLI subprocess; returns the response payload."""
     _require_cli()
@@ -142,7 +165,7 @@ def _oneshot(request: dict, node: str) -> dict:
         raise RuntimeError(
             f"sanitize CLI failed (exit {proc.returncode}): {proc.stderr.strip()}"
         )
-    return _check(json.loads(proc.stdout))
+    return _check(_parse_cli_json(proc.stdout))
 
 
 def _dispatch(request: dict, *, persist: bool, node: str) -> dict:
@@ -246,6 +269,12 @@ class Sanitizer:
                 result = s.sanitize(page, html=True)
     """
 
+    # Bound on a single response read. The CLI emits exactly one line per input
+    # line, so a read that never completes means the worker wedged (a CLI bug, or
+    # a process killed/hung mid-response); surfacing it as a timeout beats a
+    # caller hanging forever on an unbounded ``readline``.
+    _READ_TIMEOUT_S = 30.0
+
     def __init__(self, node: str = "node") -> None:
         self._node = node
         self._proc: subprocess.Popen | None = None
@@ -262,6 +291,14 @@ class Sanitizer:
         _require_cli()
         self._pid = os.getpid()
         self._stderr = tempfile.SpooledTemporaryFile(mode="w+", encoding="utf-8")
+        # On POSIX, put the worker in its own process group so a hard-killed
+        # parent's teardown can signal the whole group (the Node process plus any
+        # child it spawned), not just the immediate child — an orphaned worker
+        # otherwise lingers. The worker also exits on stdin EOF, so a clean
+        # parent exit closes stdin and the worker drains and quits on its own.
+        popen_kwargs: dict = {}
+        if hasattr(os, "setsid"):
+            popen_kwargs["start_new_session"] = True
         try:
             self._proc = subprocess.Popen(
                 [self._node, str(_CLI), "--worker"],
@@ -271,6 +308,7 @@ class Sanitizer:
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
+                **popen_kwargs,
             )
         except FileNotFoundError as cause:
             self._stderr.close()
@@ -289,22 +327,64 @@ class Sanitizer:
 
     def request(self, payload: dict) -> dict:
         """Send one request object, return its response payload (raises on error)."""
-        if self._proc is None or self._proc.poll() is not None:
+        if self._proc is None:
             raise RuntimeError("worker is not running (use it as a context manager)")
+        if self._proc.poll() is not None:
+            # Started and since died (killed/crashed mid-use): a "use it as a
+            # context manager" message would lie about it never having run.
+            raise RuntimeError(
+                f"sanitize worker exited unexpectedly: {self._drain_stderr()}"
+            )
         assert self._proc.stdin is not None and self._proc.stdout is not None
-        self._proc.stdin.write(json.dumps(payload) + "\n")
-        self._proc.stdin.flush()
-        # Blocking read with no timeout, under _shared_worker_lock for the shared
-        # worker: the serialized one-line-per-request protocol can't interleave,
-        # but a worker that never answers would wedge every persistent caller.
-        # The CLI emits exactly one line per request, so this is bounded in
-        # practice; a hang means a CLI bug, surfaced as a stuck process.
-        line = self._proc.stdout.readline()
+        # TOCTOU: the worker can die between the poll() above and this write, in
+        # which case the OS raises BrokenPipeError / ValueError (closed file).
+        # Catch both and report the worker's stderr instead of leaking a raw I/O
+        # error with no sanitizer context.
+        try:
+            self._proc.stdin.write(json.dumps(payload) + "\n")
+            self._proc.stdin.flush()
+        except (BrokenPipeError, ValueError, OSError) as cause:
+            raise RuntimeError(
+                f"sanitize worker exited unexpectedly: {self._drain_stderr()}"
+            ) from cause
+        # The serialized one-line-per-request protocol can't interleave (the
+        # shared worker holds _shared_worker_lock across the whole call), and the
+        # CLI emits exactly one line per request — so this read is bounded in
+        # practice. The timeout guards the pathological case (a CLI bug or a
+        # process wedged mid-response) so a missing response surfaces as a clear
+        # error instead of hanging the caller forever.
+        line = self._read_response_line()
         if line == "":
             raise RuntimeError(
                 f"sanitize worker exited unexpectedly: {self._drain_stderr()}"
             )
-        return _check(json.loads(line))
+        return _check(_parse_cli_json(line))
+
+    def _read_response_line(self) -> str:
+        """Read one response line, bounding the wait so a wedged worker surfaces
+        as a clear timeout rather than an unbounded hang.
+
+        ``readline`` can't be interrupted, so it runs on a daemon thread we join
+        with a timeout; on timeout we kill the worker (its response is lost and
+        the protocol is desynced — the worker is unusable) and raise.
+        """
+        assert self._proc is not None and self._proc.stdout is not None
+        result: list[str] = []
+
+        def _read() -> None:
+            assert self._proc is not None and self._proc.stdout is not None
+            result.append(self._proc.stdout.readline())
+
+        reader = threading.Thread(target=_read, daemon=True)
+        reader.start()
+        reader.join(self._READ_TIMEOUT_S)
+        if reader.is_alive():
+            self._terminate_proc()
+            raise RuntimeError(
+                "sanitize worker did not respond within "
+                f"{self._READ_TIMEOUT_S}s and was terminated: {self._drain_stderr()}"
+            )
+        return result[0]
 
     def sanitize(self, text: str, *, html: bool = False) -> SanitizeResult:
         return SanitizeResult(**self.request({"text": text, "html": html}))
@@ -315,15 +395,44 @@ class Sanitizer:
         self._stderr.seek(0)
         return self._stderr.read().strip()
 
+    def _kill_group(self) -> None:
+        """Kill the worker's whole process group (POSIX) so any child it spawned
+        dies with it; fall back to killing just the worker elsewhere or if the
+        group is already gone."""
+        if self._proc is None:
+            return
+        killed_group = False
+        if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+                killed_group = True
+            except (ProcessLookupError, PermissionError):
+                # Group already reaped, or not our group to signal — fall back.
+                pass
+        if not killed_group:
+            self._proc.kill()
+
+    def _terminate_proc(self) -> None:
+        """Force-kill a wedged/unresponsive worker (group and all) and reap it."""
+        if self._proc is None:
+            return
+        self._kill_group()
+        self._proc.wait()
+
     def close(self) -> None:
         if self._proc is None:
             return
+        # Closing stdin is the graceful path: the worker reads EOF and exits on
+        # its own. If it doesn't within the grace window, kill the whole group.
         if self._proc.stdin is not None:
-            self._proc.stdin.close()
+            try:
+                self._proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
         try:
             self._proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self._proc.kill()
+            self._kill_group()
             self._proc.wait()
         if self._proc.stdout is not None:
             self._proc.stdout.close()
