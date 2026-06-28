@@ -9,11 +9,13 @@ truth and the client must faithfully relay it.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -374,3 +376,238 @@ def test_non_json_stdout_raises_wrapped_error() -> None:
         mp.setattr(ais, "_CLI", fake_cli)
         with pytest.raises(RuntimeError, match="non-JSON output"):
             sanitize("x", persist=False)
+
+
+# ─── CLI resolution: env-var override for a pip-installed package ─────────────
+
+
+def test_cli_env_var_overrides_source_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A pip-installed package has no source sibling; AGENT_SANITIZER_CLI must
+    # point the client at a JS checkout's CLI and take priority over _CLI.
+    monkeypatch.setattr(ais, "_CLI", REPO_ROOT / "bin" / "does-not-exist.mjs")
+    monkeypatch.setenv(
+        "AGENT_SANITIZER_CLI", str(REPO_ROOT / "bin" / "sanitize-cli.mjs")
+    )
+    assert sanitize(f"a{ZERO_WIDTH_SPACE}b").cleaned == "ab"
+
+
+def test_cli_env_var_missing_file_fails_with_both_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An env var pointing at a non-existent CLI fails loudly, and the message
+    # names both ways to locate the CLI (env var + source checkout).
+    monkeypatch.setenv("AGENT_SANITIZER_CLI", "/no/such/sanitize-cli.mjs")
+    with pytest.raises(RuntimeError, match="sanitize CLI not found") as exc:
+        sanitize("x")
+    assert "AGENT_SANITIZER_CLI" in str(exc.value)
+    assert "repo checkout" in str(exc.value)
+
+
+# ─── Process lifecycle: fork, read-timeout, group-kill, atexit teardown ──────
+
+
+def _write_fake_cli(body: str) -> Path:
+    """Write a fake worker-mode CLI (a Node script) and return its path. Each
+    gets its own temp dir so concurrent fakes never collide."""
+    fake = Path(tempfile.mkdtemp()) / "fake-cli.mjs"
+    fake.write_text(body, encoding="utf-8")
+    return fake
+
+
+def _pid_alive(pid: int) -> bool:
+    """True iff `pid` names a live process (signal 0 probes without killing)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but not ours to signal
+    return True
+
+
+def test_fork_child_spawns_own_worker_parent_pipe_intact() -> None:
+    # A real os.fork: the child inherits the parent's shared worker reference but
+    # MUST NOT drive the parent's pipe. _shared_worker detects the pid mismatch
+    # and spawns a worker the child owns; the parent's worker stays untouched.
+    sanitize("warm-up", persist=True)
+    parent_worker = ais._worker
+    assert parent_worker is not None and parent_worker.is_alive()
+    parent_node_pid = parent_worker._proc.pid
+
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # child
+        os.close(read_fd)
+        code = 0
+        try:
+            result = sanitize(f"a{ZERO_WIDTH_SPACE}b", persist=True)
+            child_worker = ais._worker
+            # The child must have its OWN worker (a different Node process) and a
+            # correct result; reusing the parent's pipe would desync or hang.
+            own = (
+                child_worker is not None
+                and child_worker is not parent_worker
+                and child_worker._proc.pid != parent_node_pid
+                and child_worker._pid == os.getpid()
+                and result.cleaned == "ab"
+            )
+            os.write(write_fd, str(child_worker._proc.pid).encode())
+            code = 0 if own else 1
+        except BaseException:  # noqa: BLE001 — child must never raise into pytest
+            code = 2
+        finally:
+            os.close(write_fd)
+            os._exit(code)
+
+    # parent
+    os.close(write_fd)
+    child_worker_pid = int(os.read(read_fd, 32).decode() or "0")
+    os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+    # The child's worker is a genuinely different Node process.
+    assert child_worker_pid not in (0, parent_node_pid)
+    # The parent's worker survived the fork untouched and still serves.
+    assert ais._worker is parent_worker and parent_worker.is_alive()
+    assert sanitize("still-here", persist=True).cleaned == "still-here"
+
+
+def test_worker_read_timeout_terminates_and_raises() -> None:
+    # A worker that reads a request but never replies must surface as a clear
+    # "did not respond" timeout (not an unbounded hang), and be dead afterward.
+    fake = _write_fake_cli(
+        # Consume stdin line-by-line and deliberately never write a response.
+        "import readline from 'node:readline';\n"
+        "const rl = readline.createInterface({ input: process.stdin });\n"
+        "rl.on('line', () => {});\n"
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ais, "_CLI", fake)
+        mp.setattr(Sanitizer, "_READ_TIMEOUT_S", 1.0)
+        worker = Sanitizer().start()
+        node_pid = worker._proc.pid
+        with pytest.raises(RuntimeError, match="did not respond"):
+            worker.sanitize("x")
+        assert not worker.is_alive()
+        # The real OS process was reaped by the timeout's _terminate_proc.
+        worker._proc.wait()
+        assert not _pid_alive(node_pid)
+        worker.close()
+
+
+def test_close_kills_grandchild_via_process_group() -> None:
+    # close() must group-kill: a long-lived grandchild the worker spawned shares
+    # the worker's process group (start_new_session) and must die with it.
+    fake = _write_fake_cli(
+        # Spawn a detached-but-same-group child that sleeps long and prints its
+        # PID to stderr, then idle reading stdin so close()'s EOF doesn't race.
+        "import { spawn } from 'node:child_process';\n"
+        "import readline from 'node:readline';\n"
+        "const child = spawn(process.execPath, "
+        "['-e', 'setTimeout(() => {}, 600000)']);\n"
+        "process.stderr.write('grandchild:' + child.pid + '\\n');\n"
+        "readline.createInterface({ input: process.stdin }).on('line', () => {});\n"
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ais, "_CLI", fake)
+        worker = Sanitizer().start()
+        node_pid = worker._proc.pid
+        # Wait for the grandchild PID to appear on the worker's stderr temp file.
+        deadline = time.monotonic() + 10
+        grandchild_pid = None
+        while time.monotonic() < deadline:
+            text = worker._drain_stderr()
+            match = re.search(r"grandchild:(\d+)", text)
+            if match:
+                grandchild_pid = int(match.group(1))
+                break
+            time.sleep(0.05)
+        assert grandchild_pid is not None, "fake worker never reported a grandchild"
+        assert _pid_alive(grandchild_pid)
+
+        worker.close()
+        # After close(), both the worker and its grandchild are gone.
+        deadline = time.monotonic() + 10
+        while _pid_alive(grandchild_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _pid_alive(grandchild_pid), "grandchild outlived close() group-kill"
+        assert not _pid_alive(node_pid)
+
+
+def test_atexit_teardown_reaps_real_node_process() -> None:
+    # A process that starts the shared persistent worker and exits WITHOUT
+    # calling shutdown_worker must still leave no Node process behind: the
+    # atexit hook tears it down. We capture the real Node PID and assert it dies.
+    node = shutil.which("node")
+    assert node is not None
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO_ROOT / 'python')!r})\n"
+        "import agent_input_sanitizer as ais\n"
+        "ais.sanitize('x', persist=True)\n"
+        "print(ais._worker._proc.pid, flush=True)\n"
+        # Exit without shutdown_worker(): only the atexit hook can reap it.
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    node_pid = int(proc.stdout.strip())
+    # The child Python has exited; its atexit hook should have torn the worker
+    # down. Give the OS a moment to reap, then assert the Node process is gone.
+    deadline = time.monotonic() + 10
+    while _pid_alive(node_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _pid_alive(node_pid), "atexit hook left the Node worker running"
+
+
+# ─── Cross-language golden: Python client byte-identical to the JS recording ──
+
+
+def _from_units(units: list[int]) -> str:
+    """Reconstruct a Python string from an array of UTF-16 code units, mirroring
+    the JS generator's String.fromCharCode. Decoding the units as UTF-16-LE with
+    ``surrogatepass`` combines surrogate pairs into the astral scalar while
+    leaving a lone surrogate intact — so the input is byte-identical to the JS
+    side (which a JSON string couldn't carry losslessly)."""
+    raw = b"".join(u.to_bytes(2, "little") for u in units)
+    return raw.decode("utf-16-le", "surrogatepass")
+
+
+def _to_units(text: str) -> list[int]:
+    """A Python string back to its UTF-16 code units (astral chars split into
+    surrogate pairs), the same representation the JS generator recorded. Compared
+    as units so an encoding mismatch can't hide behind a code-point compare."""
+    raw = text.encode("utf-16-le", "surrogatepass")
+    return [int.from_bytes(raw[i : i + 2], "little") for i in range(0, len(raw), 2)]
+
+
+def _golden_cases() -> list[dict]:
+    corpus = json.loads((REPO_ROOT / "tests" / "golden-corpus.json").read_text("utf-8"))
+    golden = json.loads((REPO_ROOT / "tests" / "golden.json").read_text("utf-8"))
+    # The JS golden test pins name-order equality of corpus⇄golden; rely on it
+    # and zip so each Python case carries both the input and its recorded output.
+    assert [c["name"] for c in corpus["cases"]] == [c["name"] for c in golden["cases"]]
+    return [
+        {"name": g["name"], "input": _from_units(c["units"]), "golden": g}
+        for c, g in zip(corpus["cases"], golden["cases"])
+    ]
+
+
+_GOLDEN = _golden_cases()
+
+
+@pytest.mark.parametrize("html", [False, True], ids=["plain", "html"])
+@pytest.mark.parametrize("case", _GOLDEN, ids=[c["name"] for c in _GOLDEN])
+def test_python_client_matches_js_golden(case: dict, html: bool) -> None:
+    # The Python client and the JS `sanitize` share one source of truth (`src/`
+    # via the CLI), so the client's output must equal the recorded JS output
+    # byte-for-byte — including lone surrogates and astral chars, compared as
+    # code units so an encoding mismatch can't hide behind a string compare.
+    recorded = case["golden"]["html" if html else "plain"]
+    result = sanitize(case["input"], html=html)
+    assert _to_units(result.cleaned) == recorded["cleaned"], case["name"]
+    assert result.found == recorded["found"], case["name"]
+    assert result.warnings == recorded["warnings"], case["name"]

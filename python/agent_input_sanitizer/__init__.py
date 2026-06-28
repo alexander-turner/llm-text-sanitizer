@@ -28,6 +28,20 @@ The CLI caps a single request at ``AGENT_SANITIZER_MAX_INPUT_BYTES`` UTF-8 bytes
 (default 10 MiB); a larger request fails with a clear error instead of buffering
 an unbounded payload. Set that environment variable in the calling process to
 raise or lower the limit.
+
+Locating the CLI: the sanitizer's logic lives only in the JavaScript ``src/``,
+and the wheel deliberately does **not** bundle it (a vendored copy would be the
+exact drift this design avoids). So an installed package must be told where the
+JS checkout's CLI lives. Resolution order:
+
+#. ``AGENT_SANITIZER_CLI`` — an explicit path to ``sanitize-cli.mjs`` (or any
+   compatible CLI). This is how a pip-installed package reaches the JS; point it
+   at the ``bin/sanitize-cli.mjs`` of a cloned/``npm install``-ed checkout.
+#. The source-tree sibling — when this module is imported from a repo checkout,
+   the CLI is at ``<repo>/bin/sanitize-cli.mjs`` (two parents up).
+
+If neither resolves, every entry point fails loudly with a message naming both
+options, rather than an opaque ``node: Cannot find module``.
 """
 
 import atexit
@@ -40,9 +54,15 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The CLI lives at <repo>/bin/sanitize-cli.mjs; this module is at
-# <repo>/python/agent_input_sanitizer/__init__.py, so the repo root is two
-# parents up.
+# Env var an installed package uses to point at a JS checkout's CLI (the wheel
+# does not bundle the JS — see the module docstring).
+_CLI_ENV = "AGENT_SANITIZER_CLI"
+
+# The source-tree fallback: this module is at
+# <repo>/python/agent_input_sanitizer/__init__.py, so <repo>/bin/sanitize-cli.mjs
+# is two parents up. This resolves only when imported from a checkout; an
+# installed package relies on _CLI_ENV. Kept as a module attribute so the
+# resolver (and tests) can read or override it.
 _CLI = Path(__file__).resolve().parents[2] / "bin" / "sanitize-cli.mjs"
 
 __all__ = [
@@ -109,19 +129,33 @@ def _node_missing(node: str) -> RuntimeError:
     )
 
 
-def _require_cli() -> None:
-    """Fail with a clear message if the bundled CLI isn't where we expect.
-
-    The CLI is resolved relative to this module's source tree, so the client
-    only works from a repo checkout (it is not yet pip-installable). Without
-    this check a missing CLI surfaces as an opaque "node: Cannot find module".
+def _resolve_cli() -> Path:
+    """Resolve the path to the sanitize CLI: ``AGENT_SANITIZER_CLI`` if set, else
+    the source-tree sibling (``_CLI``). See the module docstring for the rationale
+    (the wheel doesn't bundle the JS, so an installed package needs the env var).
     """
-    if not _CLI.is_file():
+    override = os.environ.get(_CLI_ENV)
+    if override:
+        return Path(override)
+    return _CLI
+
+
+def _require_cli() -> Path:
+    """Resolve the CLI path and fail with a clear message if it isn't a file.
+
+    Without this check a missing CLI surfaces as an opaque "node: Cannot find
+    module". The message names both ways to locate the CLI so a pip-installed
+    user (no source sibling) knows to set ``AGENT_SANITIZER_CLI``.
+    """
+    cli = _resolve_cli()
+    if not cli.is_file():
         raise RuntimeError(
-            f"sanitize CLI not found at {_CLI}. The Python client resolves the "
-            "bundled CLI relative to its source checkout and is not yet "
-            "pip-installable; run it from a repo checkout."
+            f"sanitize CLI not found at {cli}. Set the {_CLI_ENV} environment "
+            "variable to the path of a JavaScript checkout's bin/sanitize-cli.mjs, "
+            "or run the client from a repo checkout (the CLI is resolved relative "
+            "to its source tree). The wheel does not bundle the JS CLI."
         )
+    return cli
 
 
 def _check(response: dict) -> dict:
@@ -150,10 +184,10 @@ def _parse_cli_json(output: str) -> dict:
 
 def _oneshot(request: dict, node: str) -> dict:
     """One request through a fresh CLI subprocess; returns the response payload."""
-    _require_cli()
+    cli = _require_cli()
     try:
         proc = subprocess.run(
-            [node, str(_CLI)],
+            [node, str(cli)],
             input=json.dumps(request),
             capture_output=True,
             text=True,
@@ -288,7 +322,7 @@ class Sanitizer:
         self._stderr: tempfile.SpooledTemporaryFile | None = None
 
     def start(self) -> "Sanitizer":
-        _require_cli()
+        cli = _require_cli()
         self._pid = os.getpid()
         self._stderr = tempfile.SpooledTemporaryFile(mode="w+", encoding="utf-8")
         # On POSIX, put the worker in its own process group so a hard-killed
@@ -301,7 +335,7 @@ class Sanitizer:
             popen_kwargs["start_new_session"] = True
         try:
             self._proc = subprocess.Popen(
-                [self._node, str(_CLI), "--worker"],
+                [self._node, str(cli), "--worker"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=self._stderr,
