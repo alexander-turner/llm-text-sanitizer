@@ -342,6 +342,16 @@ describe("isSgrOnly", () => {
     assert.equal(isSgrOnly(cp(0x9b)), false));
   it("SGR_RE matches a C1-introduced color sequence", () =>
     assert.equal(`${cp(0x9b)}31mx`.replace(SGR_RE, ""), "x"));
+
+  // C1 OSC (U+009D) is an Operating System Command string, not SGR. A residual
+  // C1-OSC introducer must read as NOT SGR-only (the S1 residual: the test only
+  // knew U+009B, so a string whose sole introducer was U+009D slipped through as
+  // "SGR-only"). The paired SGR case stays true to prove the widening did not
+  // over-reject genuine color.
+  it("is false for a C1-OSC (U+009D) string", () =>
+    assert.equal(isSgrOnly(`${cp(0x9d)}0;title${cp(0x07)}`), false));
+  it("stays true for a genuine 7-bit SGR color string", () =>
+    assert.equal(isSgrOnly(`${cp(0x1b)}[31mred${cp(0x1b)}[0m`), true));
 });
 
 // ─── LONG_RUN_RE ─────────────────────────────────────────────────────────────

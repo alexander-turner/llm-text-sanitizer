@@ -94,12 +94,15 @@ export const STRIP = new RegExp(
 // eslint-disable-next-line no-control-regex -- matching ESC-led sequences is the point
 export const SGR_RE = /(?:\x1b\[|)[0-9;]*m/g;
 
-// The two raw ANSI control introducers: 7-bit ESC (U+001B) and 8-bit C1 CSI
-// (U+009B). isSgrOnly is honest only if it tests for BOTH — a C1 cursor-move or
-// erase (`U+009B 2J`) leaves a U+009B after SGR removal and must read as NOT
-// SGR-only, exactly as its 7-bit `ESC[2J` twin does.
+// The raw ANSI control introducers isSgrOnly must treat as NON-SGR after SGR
+// removal: 7-bit ESC (U+001B), 8-bit C1 CSI (U+009B), and 8-bit C1 OSC
+// (U+009D). isSgrOnly is honest only if it tests for ALL THREE — a C1
+// cursor-move or erase (`U+009B 2J`) leaves a U+009B, and a C1-OSC string
+// (`U+009D … BEL`) leaves a U+009D, after SGR removal; both must read as NOT
+// SGR-only, exactly as their 7-bit `ESC[2J` / `ESC]…` twins do. Omitting
+// U+009D would let a residual C1-OSC introducer be misread as SGR-only.
 // eslint-disable-next-line no-control-regex -- the raw introducers are what we test for
-const CONTROL_INTRODUCER_RE = /[\x1b]/;
+const CONTROL_INTRODUCER_RE = /[\x1b\x9b\x9d]/;
 
 /**
  * True when every ANSI control introducer in `text` belongs to a display-only
