@@ -70,7 +70,6 @@
     "globals": "17.6.0",
     "lint-staged": "^17.0.5",
     "prettier": "^3.0.0",
-    "punctilio": "^3.10.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.61.0"
   },
