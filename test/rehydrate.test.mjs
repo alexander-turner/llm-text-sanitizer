@@ -570,6 +570,52 @@ describe("rehydrate: stripped-character re-anchoring", () => {
     );
   });
 
+  it("fails closed (null, no throw) on an empty old_string against a divergent-view file", async () => {
+    // A stripped ANSI run makes the Layer-1 view diverge from disk, so this
+    // Edit reaches rehydrateEdit. An empty old_string would otherwise hit
+    // occurrences(view.text, "") — which used to loop until a RangeError.
+    // Edit's own create/anchor handling owns the empty case, so pass through.
+    const content = `${GREEN}green${RESET} text\n`;
+    let out;
+    await assert.doesNotReject(async () => {
+      out = await rehydrateRedacted(
+        "Edit",
+        { file_path: "/f", old_string: "", new_string: "inserted" },
+        liveIo(content),
+      );
+    });
+    assert.equal(out, null);
+  });
+
+  it("returns null (not a misleading deny) for an empty old_string whose new_string carries a placeholder", async () => {
+    // Without the empty-old_string guard, occurrences("") returns [] and the
+    // call falls into the literal/empty-span resolver, which — because
+    // new_string names a redacted secret outside the (empty) span — emits the
+    // "extend old_string to cover that secret" deny. That guidance is nonsense
+    // for an empty old_string (Edit's create case), so the guard must short
+    // out to null first. This case fails (deny, not null) if the guard is
+    // removed, so it pins the guard's behavior, not just the no-throw fix.
+    const content = `${GREEN}green${RESET}\nPASSWORD=${SECRET_A}\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      { file_path: "/f", old_string: "", new_string: `X=${PH}` },
+      liveIo(content, [{ value: SECRET_A, placeholder: PH }], reRedact),
+    );
+    assert.equal(out, null);
+  });
+
+  it("fails closed (null) on an empty old_string against a zero-width-divergent file", async () => {
+    // Second divergence flavor (stripped invisible char) to prove the guard is
+    // not specific to ANSI.
+    const content = `note${ZW}here\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      { file_path: "/f", old_string: "", new_string: "x" },
+      liveIo(content),
+    );
+    assert.equal(out, null);
+  });
+
   it("passes through a hint-free stale old_string on a divergent file", async () => {
     const content = `${ZW}note\n`;
     const out = await rehydrateRedacted(

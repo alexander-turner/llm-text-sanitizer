@@ -16,7 +16,7 @@
     "sanitize-cli": "bin/sanitize-cli.mjs"
   },
   "scripts": {
-    "postinstall": "git config core.hooksPath .hooks",
+    "prepare": "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git config core.hooksPath .hooks; fi",
     "test": "c8 node --test",
     "coverage": "c8 node --test",
     "check": "tsc --noEmit",
@@ -134,7 +134,7 @@
     }
   },
   "files": [
-    "src",
+    "src/*.mjs",
     "bin/sanitize-cli.mjs",
     "types",
     "LICENSE",

@@ -32,16 +32,17 @@ Split into subpaths so the heavy HTML dependency stays opt-in. The **seam**
 column is the agent-specific concern each one injects, so it knows nothing about
 any particular harness.
 
-| #   | Import          | Purpose                                                                                                                            | Seam                        |
-| --- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| 1   | `/invisible`    | Strip zero-width, bidi, variation-selector and tag chars + ANSI/SGR escapes. Preserves ZWNJ/ZWJ for Arabic/Indic/emoji. Zero deps. | —                           |
-| 2   | `/html`         | Splice out instructions hidden in comments, `display:none`, off-screen, white-on-white, `hidden`. Leaves a placeholder.            | —                           |
-| 3   | `/html`         | Detect exfil-shaped URLs (payloads in query/path, embedded creds, `data:`/`javascript:`, off-origin redirects). Reports only.      | —                           |
-| 4   | `/confusables`  | Fold look-alike glyphs in tool-call input (paths, commands) to ASCII, closing a cross-script deny-rule bypass.                     | `scan`                      |
-| 5   | `/instructions` | Scan/auto-clean `CLAUDE.md`, `AGENTS.md`, `SKILL.md`, etc., decoding Unicode-tag + zero-width-binary payloads.                     | glob set                    |
-| 6   | `/prompt`       | Classify a prompt pass / SGR-note / block on payload-capable invisible/ANSI content.                                               | —                           |
-| 7   | `/output`       | Run Layers 1–4 over structured tool output, preserving shape. The Layer-5 slot takes a delete-only filter.                         | `redact`, `filterInjection` |
-| 8   | `/rehydrate`    | Re-anchor a model Edit composed from the _sanitized_ view back onto real bytes; deny anything ambiguous or secret-exposing.        | `io`                        |
+| #   | Import          | Purpose                                                                                                                                                    | Seam                        |
+| --- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| 1   | `/invisible`    | Strip zero-width, bidi, variation-selector and tag chars + ANSI/SGR escapes. Preserves ZWNJ/ZWJ for Arabic/Indic/emoji. Zero deps.                         | —                           |
+| 2   | `/html`         | Splice out instructions hidden in comments, `display:none`, off-screen, white-on-white, `hidden`. Leaves a placeholder.                                    | —                           |
+| 3   | `/html`         | Detect exfil-shaped URLs (payloads in query/path, embedded creds, `data:`/`javascript:`, off-origin redirects). Reports only.                              | —                           |
+| 4   | `/confusables`  | Fold look-alike glyphs in tool-call input (paths, commands) to ASCII, closing a cross-script deny-rule bypass.                                             | `scan`                      |
+| 5   | `/instructions` | Scan/auto-clean `CLAUDE.md`, `AGENTS.md`, `SKILL.md`, etc., decoding Unicode-tag + zero-width-binary payloads.                                             | glob set                    |
+| 6   | `/prompt`       | Classify a prompt pass / SGR-note / block on payload-capable invisible/ANSI content.                                                                       | —                           |
+| 7   | `/output`       | Run Layers 1–4 over structured tool output, preserving shape. The Layer-5 slot takes a delete-only filter.                                                 | `redact`, `filterInjection` |
+| 8   | `/rehydrate`    | Re-anchor a model Edit composed from the _sanitized_ view back onto real bytes; deny anything ambiguous or secret-exposing.                                | `io`                        |
+| —   | `/view-map`     | Pure offset/text machinery mapping a file's on-disk bytes ↔ the sanitized view (Layer-1 deletions, Layer-4 redactions). No I/O — consumed by `/rehydrate`. | —                           |
 
 See [THREAT-MODEL.md](./THREAT-MODEL.md) for per-vector detail.
 
@@ -116,11 +117,13 @@ sanitize-cli --worker                              # newline-delimited, one resp
 ```
 
 The [`python/`](./python) client wraps every bridged op (`sanitize`,
-`sanitize_text`, `classify_prompt`, `scan_instruction_files`, `clean_file`). The
+`sanitize_text`, `classify_prompt`, `scan_instruction_files`, `clean_file`). It
+requires **Node ≥20 on `PATH`** and, today, resolves the bundled CLI relative to
+its own source tree—so it runs from a repo checkout, not yet a `pip install`. The
 first `html=True` call starts a shared worker, so the ~200 ms HTML module-load
 is paid **once per process**; Layer-1 calls stay one-shot. `persist=True/False`
 forces the mode and `shutdown_worker()` (also an `atexit` hook) stops it. Missing
-Node fails loudly—a pure-Python port _is_ the drift this avoids.
+Node or a missing CLI fails loudly—a pure-Python port _is_ the drift this avoids.
 
 ```python
 from agent_input_sanitizer import sanitize, Sanitizer

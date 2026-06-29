@@ -25,6 +25,7 @@ import {
   findInstructionFiles,
   scanInstructionFiles,
   cleanFile,
+  atomicReplaceFile,
 } from "../src/instructions.mjs";
 import { LONG_RUN_THRESHOLD, SCATTERED_THRESHOLD } from "../src/invisible.mjs";
 import { cp } from "./test-helpers.mjs";
@@ -85,6 +86,29 @@ describe("decodeRun", () => {
     const result = decodeRun(`${cp(0x00ad)}${cp(0x200b)}`);
     assert.match(result.method, /invisible Unicode/);
     assert.equal(result.decoded, "U+00AD U+200B");
+  });
+
+  it("reports the zero-width count for a run mixing tag-ASCII and ZW chars", () => {
+    // A run with tag-encoded "rm -rf" plus 3 ZWSP: the tag branch decodes the
+    // ASCII but must also note the zero-width portion rather than dropping it.
+    const result = decodeRun(`${tagChars("rm -rf")}${zwRun(3)}`);
+    assert.equal(result.method, "Unicode tag characters → ASCII");
+    assert.equal(result.decoded, "rm -rf + 3 zero-width char(s)");
+  });
+
+  it("appends no zero-width note for a pure-tag run", () => {
+    const result = decodeRun(tagChars("payload"));
+    assert.equal(result.method, "Unicode tag characters → ASCII");
+    assert.equal(result.decoded, "payload");
+  });
+
+  it("counts ZWNJ and ZWJ in the mixed-run note, not just ZWSP", () => {
+    // The note counts every ZW-bit char (ZWSP/ZWNJ/ZWJ), so a mix of all three
+    // alongside tag-ASCII reports the full count.
+    const result = decodeRun(
+      `${tagChars("x")}${cp(0x200b)}${cp(0x200c)}${cp(0x200d)}`,
+    );
+    assert.equal(result.decoded, "x + 3 zero-width char(s)");
   });
 });
 
@@ -529,5 +553,56 @@ describe("cleanFile atomic write", () => {
     cleanFile(file);
     // The atomic rename consumes the temp; only the cleaned file remains.
     assert.deepEqual(readdirSync(tmpDir), ["CLAUDE.md"]);
+  });
+
+  it("atomicReplaceFile does NOT write through a pre-planted symlink at the temp path", () => {
+    // R5 invariant, driven through the real code path: atomicReplaceFile creates
+    // its temp with O_CREAT|O_EXCL ("wx"). When the temp path already exists as
+    // an attacker-planted symlink to a victim, the open fails (EEXIST) and the
+    // write does NOT follow the link to clobber the victim. We force a known
+    // temp name via the injectable generator to plant the symlink deterministically.
+    const target = join(tmpDir, "CLAUDE.md");
+    const victim = join(tmpDir, "victim.md");
+    const tmpLeaf = ".attacker-known.tmp";
+    writeFileSync(target, "# replace me\n");
+    writeFileSync(victim, "do not clobber me\n");
+    symlinkSync(victim, join(tmpDir, tmpLeaf), "file");
+    assert.throws(
+      () => atomicReplaceFile(target, "NEW CONTENT", 0o600, () => tmpLeaf),
+      /EEXIST/,
+      "wx must refuse the pre-existing symlinked temp path, not follow it",
+    );
+    assert.equal(
+      readFileSync(victim, "utf-8"),
+      "do not clobber me\n",
+      "the symlink target must be byte-for-byte unchanged",
+    );
+    assert.equal(
+      readFileSync(target, "utf-8"),
+      "# replace me\n",
+      "the original is left intact when the temp write fails",
+    );
+  });
+
+  it("atomicReplaceFile replaces atomically and preserves mode on the happy path", () => {
+    const target = join(tmpDir, "CLAUDE.md");
+    writeFileSync(target, "old\n");
+    atomicReplaceFile(target, "new content\n", 0o640);
+    assert.equal(readFileSync(target, "utf-8"), "new content\n");
+    assert.equal(statSync(target).mode & 0o777, 0o640);
+    assert.deepEqual(readdirSync(tmpDir), ["CLAUDE.md"]);
+  });
+
+  it("cleans a regular file atomically with mode preserved (happy path intact)", () => {
+    const file = join(tmpDir, "AGENTS.md");
+    writeFileSync(file, `# ok\n${tagChars("rm -rf payload here")}\n`);
+    chmodSync(file, 0o644);
+    const before = statSync(file).mode;
+    assert.equal(cleanFile(file), true);
+    const cleaned = readFileSync(file, "utf-8");
+    assert.doesNotMatch(cleaned, /[\u{E0001}-\u{E007F}]/u);
+    assert.match(cleaned, /# ok/);
+    assert.equal(statSync(file).mode, before, "mode preserved across rewrite");
+    assert.deepEqual(readdirSync(tmpDir), ["AGENTS.md"]);
   });
 });

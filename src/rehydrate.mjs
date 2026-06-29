@@ -114,6 +114,11 @@ async function rehydrateEdit(
   hint,
 ) {
   const oldS = ti.old_string;
+  // An empty old_string is not a view span the model copied — in real Edit it
+  // is the create/insert-at-anchor case, which Edit handles itself. There is
+  // nothing to re-anchor; pass through (null) so Edit surfaces its own
+  // behavior and the empty needle never reaches occurrences.
+  if (oldS === "") return null;
   // Resolve against the VIEW first — it is the only thing the model can have
   // copied from. A verbatim disk match is only trusted when the view has no
   // match: on a divergent file, raw bytes can contain an accidental match

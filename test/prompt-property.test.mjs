@@ -34,20 +34,26 @@ const unicodeChar = fc
 const loneSurrogate = fc
   .integer({ min: 0xd800, max: 0xdfff })
   .map((c) => String.fromCharCode(c));
-// Payload-capable invisibles across each CHECKS category, plus ESC.
+// Payload-capable invisibles across each CHECKS category (Cf zero-widths incl.
+// the ZWNJ/ZWJ carve-out boundary, variation selectors, the blank fillers incl.
+// the zero-width Mn combining mark and the braille blank, plus a Unicode TAG).
 const invisibleChar = fc.constantFrom(
-  ...[0x200b, 0x200d, 0x2060, 0xfeff, 0x00ad, 0xfe01, 0x3164, 0xe0041].map(
-    (c) => cp(c),
-  ),
+  ...[
+    0x200b, 0x200c, 0x200d, 0x2060, 0xfeff, 0x00ad, 0xfe01, 0xfe0f, 0x3164,
+    0x2800, 0x034f, 0xe0041,
+  ].map((c) => cp(c)),
 );
-// ANSI introducers: 7-bit ESC (U+001B) and the 8-bit C1 CSI (U+009B) / OSC
-// (U+009D) so the generator builds pure-C1 sequences, not only ESC-led ones.
-const ansiIntroducerChar = fc.constantFrom(cp(0x1b), cp(0x9b), cp(0x9d));
+// Both ANSI introducers — 7-bit ESC and 8-bit C1 forms (CSI/OSC) — plus BEL,
+// the OSC string terminator. A uniform draw reaches U+009B/U+009D ~1-in-a-million,
+// so they MUST be seeded explicitly or the C1 passthrough class is never tested.
+const ansiChar = fc.constantFrom(cp(0x1b), cp(0x9b), cp(0x9d), cp(0x07));
+const astralChar = fc.constant(cp(0x1f600));
 const adversarialChar = fc.oneof(
   unicodeChar,
   loneSurrogate,
   invisibleChar,
-  ansiIntroducerChar,
+  ansiChar,
+  astralChar,
 );
 const adversarialText = fc
   .array(adversarialChar, { maxLength: 80 })

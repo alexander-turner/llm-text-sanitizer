@@ -24,6 +24,7 @@ import {
   LONG_RUN_THRESHOLD,
   SCATTERED_THRESHOLD,
   CONSECUTIVE_JOINER_CAP,
+  TOTAL_PRESERVED_JOINER_BUDGET,
   LINGUISTIC_SCRIPTS,
 } from "../src/invisible.mjs";
 import { applyLayer1 } from "../src/layer1.mjs";
@@ -31,6 +32,9 @@ import { fcRunOptions, cp } from "./test-helpers.mjs";
 
 const ZWNJ = cp(0x200c);
 const ZWJ = cp(0x200d);
+
+/** Count occurrences of a single-char needle in a string (joiner counting). */
+const countOf = (s, ch) => s.split(ch).length - 1;
 
 // ─── stripInvisible: core classes ────────────────────────────────────────────
 
@@ -252,35 +256,35 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     });
   }
 
-  // The scatter floor (SCATTERED_THRESHOLD = 30) is the boundary: 29 invisibles
-  // keep the carve-out enabled, 30 disable it wholesale. Both sides are pinned
-  // so a `<`→`<=`/`>` mutant can't survive. Each joiner sits in its OWN word
-  // (`letter ZWNJ letter` separated by spaces) so the consecutive-joiner cap
-  // resets per word and never confounds the scatter-floor boundary being tested.
-  it(`keeps legit joiners just under the scatter floor (${SCATTERED_THRESHOLD - 1})`, () => {
+  // The scatter floor (SCATTERED_THRESHOLD = 30) is a boundary on TOTAL
+  // invisibles: 29 keep the carve-out enabled, 30 disable it wholesale. Both
+  // sides are pinned so a `<`→`<=`/`>` mutant can't survive. To probe THIS gate
+  // alone we hold the joiner count under TOTAL_PRESERVED_JOINER_BUDGET (so the
+  // budget gate doesn't trip first) and pad the rest of the floor with a
+  // non-joiner invisible class (interior BOMs) the budget never governs. A
+  // single legit Persian word (1 ZWNJ) survives at 29 total, is stripped at 30.
+  const padCount = SCATTERED_THRESHOLD - 2; // + 1 joiner = SCATTERED_THRESHOLD-1
+  const interiorBom = cp(0xfeff); // Cf, strippable, NOT a joiner
+
+  it(`keeps a legit joiner just under the scatter floor (${SCATTERED_THRESHOLD - 1} total)`, () => {
     const word = cp(0x645) + ZWNJ + cp(0x62e);
-    const input = Array.from(
-      { length: SCATTERED_THRESHOLD - 1 },
-      () => word,
-    ).join(" ");
+    // word ends, then a real visible char, then the BOM padding (interior BOMs
+    // are stripped but counted toward the floor): 1 joiner + (floor-2) = floor-1.
+    const input = word + "x" + interiorBom.repeat(padCount);
     const { cleaned, found } = stripInvisibleWithReport(input);
-    assert.equal(cleaned, input);
-    assert.deepEqual(found, []);
+    assert.equal(cleaned, word + "x"); // joiner preserved, interior BOMs gone
+    assert.deepEqual(found, [CATEGORY.CF]); // the BOM padding is reported
+    assert.equal(countOf(cleaned, ZWNJ), 1);
   });
 
-  it("strips ALL joiners once the scatter floor is reached, even legit ones", () => {
+  it("strips the joiner too once the scatter floor is reached", () => {
     const word = cp(0x645) + ZWNJ + cp(0x62e);
-    const stripped = cp(0x645) + cp(0x62e);
-    const input = Array.from({ length: SCATTERED_THRESHOLD }, () => word).join(
-      " ",
-    );
-    const expected = Array.from(
-      { length: SCATTERED_THRESHOLD },
-      () => stripped,
-    ).join(" ");
+    // 1 joiner + (floor-1) BOMs = floor total → carve-out off, joiner stripped.
+    const input = word + "x" + interiorBom.repeat(SCATTERED_THRESHOLD - 1);
     const { cleaned, found } = stripInvisibleWithReport(input);
-    assert.equal(cleaned, expected);
+    assert.equal(cleaned, cp(0x645) + cp(0x62e) + "x");
     assert.deepEqual(found, [CATEGORY.CF]);
+    assert.equal(countOf(cleaned, ZWNJ), 0);
   });
 
   it("counts EVERY invisible class toward the floor, not just joiners", () => {
@@ -394,7 +398,6 @@ describe("zero-width Mn marks", () => {
 describe("consecutive-joiner cap", () => {
   const AR1 = cp(0x645);
   const AR2 = cp(0x62e);
-  const countOf = (s, ch) => s.split(ch).length - 1;
 
   it(`caps preserved ZWNJ in an alternating Arabic run at ${CONSECUTIVE_JOINER_CAP}`, () => {
     const input = (AR1 + ZWNJ).repeat(CONSECUTIVE_JOINER_CAP + 12) + AR2;
@@ -431,6 +434,125 @@ describe("consecutive-joiner cap", () => {
     assert.equal(cleaned, FAMILY);
     assert.deepEqual(found, []);
     assert.equal(countOf(cleaned, ZWJ), 3);
+  });
+});
+
+// ─── Document-wide preserved-joiner budget (covert-channel collapse) ──────────
+// The consecutive cap resets at every genuine gap, so an attacker who puts each
+// joiner in its OWN cluster — `letter joiner letter letter` repeated, double
+// letters forming the gap that resets joinerRun — preserves one joiner per
+// cluster, threading an arbitrary number through while each sits in a per-char
+// "linguistic" context AND the total stays under the scatter floor. That was a
+// silent multi-bit zero-width channel: every joiner preserved, `found` empty.
+// TOTAL_PRESERVED_JOINER_BUDGET caps the document-wide preserved count (never
+// reset at a gap): the surplus is stripped AND reported.
+describe("document-wide preserved-joiner budget", () => {
+  const AR1 = cp(0x645);
+  const AR2 = cp(0x62e);
+
+  // One joiner per cluster, clusters separated by a double-letter gap so the
+  // consecutive cap (per-cluster) never trips — only the document-wide budget
+  // can catch this. N joiners chosen above the budget but below the scatter
+  // floor (so the floor is NOT what trips), proving the budget is the gate.
+  const N = TOTAL_PRESERVED_JOINER_BUDGET + 9; // 25 — the PoC payload size
+  assert.ok(
+    N < SCATTERED_THRESHOLD,
+    "covert-channel case must stay under the scatter floor",
+  );
+  // cluster = `letter joiner letter` then a second letter as the gap opener.
+  const cluster = AR1 + ZWNJ + AR2 + AR2;
+  const covert = cluster.repeat(N);
+
+  it("caps preserved joiners at the budget across separated clusters", () => {
+    const { cleaned, found } = stripInvisibleWithReport(covert);
+    assert.equal(countOf(covert, ZWNJ), N); // input really has N joiners
+    assert.equal(
+      countOf(cleaned, ZWNJ),
+      TOTAL_PRESERVED_JOINER_BUDGET,
+      "preserved joiner count must not exceed the budget",
+    );
+    assert.deepEqual(found, [CATEGORY.CF]); // the surplus strip is reported
+  });
+
+  it("alternating ZWNJ/ZWJ between Arabic letters is capped and flagged", () => {
+    // Closest to the literal PoC: N alternating joiners, each between two Arabic
+    // letters, clusters gap-separated. Mix the two joiner code points to prove
+    // the budget counts both.
+    let s = "";
+    for (let k = 0; k < N; k++) {
+      const j = k % 2 === 0 ? ZWNJ : ZWJ;
+      s += AR1 + j + AR2 + AR2;
+    }
+    const { cleaned, found } = stripInvisibleWithReport(s);
+    const preserved = countOf(cleaned, ZWNJ) + countOf(cleaned, ZWJ);
+    assert.equal(preserved, TOTAL_PRESERVED_JOINER_BUDGET);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("preserves exactly the budget at the boundary (none stripped, not flagged)", () => {
+    // Exactly TOTAL_PRESERVED_JOINER_BUDGET joiners, one per gap-separated
+    // cluster: all preserved, nothing reported. Pins the `<` boundary so a
+    // `<`→`<=` mutant (off-by-one over-strip) dies here.
+    const input = cluster.repeat(TOTAL_PRESERVED_JOINER_BUDGET);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+    assert.equal(countOf(cleaned, ZWNJ), TOTAL_PRESERVED_JOINER_BUDGET);
+  });
+
+  it("the budget sits below the scatter floor so it is the operative gate", () => {
+    assert.ok(TOTAL_PRESERVED_JOINER_BUDGET < SCATTERED_THRESHOLD);
+  });
+});
+
+// ─── Precision negatives: real multilingual text is preserved un-flagged ──────
+// The budget must NOT mangle or flag legitimate short multilingual content. A
+// handful of genuine joiners — a Persian/Indic compound word, an emoji ZWJ
+// sequence — stay byte-identical with an empty `found`.
+describe("budget precision: legitimate joiners preserved and un-flagged", () => {
+  // A short compound per script (1 joiner) plus a longer one (3 joiners): all
+  // well under the budget, so none is stripped or flagged. Driven off the
+  // LINGUISTIC_SCRIPTS SSOT so a new script without representative letters fails.
+  const SCRIPT_LETTERS = {
+    Arabic: [0x645, 0x62e],
+    Devanagari: [0x915, 0x937],
+    Bengali: [0x995, 0x99a],
+    Gurmukhi: [0x0a15, 0x0a17],
+    Gujarati: [0x0a95, 0x0a97],
+    Oriya: [0x0b15, 0x0b17],
+    Tamil: [0x0b95, 0x0b99],
+    Telugu: [0x0c15, 0x0c17],
+    Kannada: [0x0c95, 0x0c97],
+    Malayalam: [0x0d15, 0x0d17],
+    Sinhala: [0x0d9a, 0x0d9c],
+  };
+  for (const script of LINGUISTIC_SCRIPTS) {
+    const [a, b] = SCRIPT_LETTERS[script];
+    assert.ok(a !== undefined, `no representative letters for ${script}`);
+    it(`a 1-3 joiner ${script} compound is preserved un-flagged`, () => {
+      // " word1 word2 " with 1 then 3 joiners — 4 joiners total, under budget.
+      const w1 = cp(a) + ZWNJ + cp(b);
+      const w2 = cp(a) + ZWNJ + cp(b) + ZWNJ + cp(a) + ZWNJ + cp(b);
+      const input = `${w1} ${w2}`;
+      const { cleaned, found } = stripInvisibleWithReport(input);
+      assert.equal(cleaned, input);
+      assert.deepEqual(found, []);
+    });
+  }
+
+  it("a family emoji ZWJ sequence is preserved un-flagged", () => {
+    const { cleaned, found } = stripInvisibleWithReport(FAMILY);
+    assert.equal(cleaned, FAMILY);
+    assert.deepEqual(found, []);
+  });
+
+  it("several distinct emoji ZWJ sequences together stay under budget", () => {
+    // Three family emoji (9 ZWJ total) separated by spaces: a realistic message,
+    // still under the 16-joiner budget — preserved verbatim, no flag.
+    const input = `${FAMILY} ${FAMILY} ${FAMILY}`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
   });
 });
 
