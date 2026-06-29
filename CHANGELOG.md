@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.3.3] - 2026-06-29
+
+### Fixed
+
+- Build types in prepare so git-dependency installs ship .d.mts files.
+- Treat C1 OSC (U+009D) as a non-SGR introducer in isSgrOnly to fix invisible character handling.
+
 ## [1.3.2] - 2026-06-29
 
 ### Fixed
