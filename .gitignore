@@ -54,3 +54,4 @@ __pycache__/
 .stryker-tmp/
 reports/mutation/
 reports/stryker-incremental.json
+stryker.shard.json
