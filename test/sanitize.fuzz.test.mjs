@@ -20,13 +20,20 @@ const INVISIBLE_VALUES = [
   cp(0xfe0f),
   cp(0x3164),
   cp(0x2800),
+  cp(0x034f), // zero-width combining mark (Mn blank filler)
+  cp(0xe0041), // Unicode TAG (deniable-encoding channel)
+  cp(0x1f600), // astral (parser totality)
   `${cp(0x1b)}[31m`,
   `${cp(0x1b)}[0m`,
-  // 8-bit C1 forms of the same hazards: a complete CSI sequence and a bare
-  // introducer. Seeded explicitly because a uniform 0..0x10FFFF draw lands on
-  // U+009B only ~1-in-a-million, so the fuzzer never reaches it on its own.
+  // An OSC string terminated by BEL — exercises the 7-bit OSC + BEL terminator.
+  `${cp(0x1b)}]8;;http://x${cp(0x07)}`,
+  // 8-bit C1 forms of the same hazards: a complete CSI sequence, a bare CSI
+  // introducer, and the C1 OSC introducer. Seeded explicitly because a uniform
+  // 0..0x10FFFF draw lands on U+009B/U+009D only ~1-in-a-million, so the fuzzer
+  // never reaches them on its own.
   `${cp(0x9b)}31m`,
   cp(0x9b),
+  cp(0x9d),
 ];
 
 // Every raw ANSI control introducer Layer 1 must guarantee is gone from the

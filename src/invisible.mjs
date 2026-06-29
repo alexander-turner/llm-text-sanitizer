@@ -154,6 +154,30 @@ const ZWJ = 0x200d;
 // ordinary single linguistic/emoji joiner per word is always preserved.
 export const CONSECUTIVE_JOINER_CAP = 8;
 
+// Max joiners the carve-out will PRESERVE across the WHOLE string, summed over
+// every cluster (unlike CONSECUTIVE_JOINER_CAP, this counter never resets at a
+// gap). It closes a covert channel the consecutive cap alone leaves open: an
+// attacker writes `letter joiner letter letter` repeatedly so each joiner sits
+// between two linguistic letters (preserved) and every cluster is separated by a
+// real gap (resetting joinerRun), threading many one-bit joiners through while
+// staying under SCATTERED_THRESHOLD — so the consecutive cap never trips and
+// `found` stays empty. A document-wide budget catches the aggregate: once more
+// than this many joiners would be preserved, the surplus is stripped as payload
+// AND the category is reported, so the result is never silently carrying a large
+// hidden joiner channel.
+//
+// Sizing (precision over recall — err toward preserving real text): the scatter
+// floor already caps TOTAL invisibles at SCATTERED_THRESHOLD (30); above it the
+// carve-out is off and every joiner is stripped. So the only joiners this budget
+// governs are those in texts with fewer than 30 total invisibles. Within that
+// window, legitimate multilingual prose stays well under 16: a Persian sentence
+// carries a handful of ZWNJ, the longest standard emoji ZWJ sequences three.
+// Genuine text dense enough to need >16 joiners would also push total invisibles
+// past the scatter floor and be handled there. 16 sits comfortably above real
+// usage yet well under the 25-joiner PoC, so honest text is preserved un-flagged
+// while a stuffed channel is capped and surfaced.
+export const TOTAL_PRESERVED_JOINER_BUDGET = 16;
+
 // Scripts whose orthography uses ZWNJ/ZWJ between letters as a rendering
 // control. Single source of truth: LINGUISTIC_LETTER is built from this list,
 // and the test suite drives one preserve-case per entry, so adding a script
@@ -237,9 +261,12 @@ function bulkStrip(body) {
 /**
  * Carve-out strip (a ZWNJ/ZWJ is present): walk code points, preserving a join
  * control only where isPreservedJoiner holds AND the text stays under the
- * scatter floor — otherwise it is stripped like any other payload byte. `found`
- * reports only categories actually removed, so a preserved joiner never makes
- * the caller claim a strip that did not happen.
+ * scatter floor AND neither the per-cluster (CONSECUTIVE_JOINER_CAP) nor the
+ * document-wide (TOTAL_PRESERVED_JOINER_BUDGET) preserve limit is hit —
+ * otherwise it is stripped like any other payload byte. `found` reports only
+ * categories actually removed, so a preserved joiner never makes the caller
+ * claim a strip that did not happen, and a stuffed joiner channel surfaces as
+ * CATEGORY.CF once it overruns the budget.
  * @param {string} body
  * @returns {{ cleaned: string, found: string[] }}
  */
@@ -258,6 +285,11 @@ function carveStrip(body) {
   // genuine gap (two visible chars in a row — see prevVisible) resets it to 0;
   // once it would exceed the cap the surplus joiners are stripped as payload.
   let joinerRun = 0;
+  // Joiners preserved so far across the WHOLE string — never reset at a gap, so
+  // it caps the document-wide channel the per-cluster joinerRun cannot (see
+  // TOTAL_PRESERVED_JOINER_BUDGET). Past the budget a joiner is stripped and its
+  // category reported, even though it is in a per-char linguistic context.
+  let preservedTotal = 0;
   let prevVisible = false;
   for (let i = 0; i < cps.length; i++) {
     const ch = cps[i];
@@ -273,9 +305,11 @@ function carveStrip(body) {
     if (
       allowCarveOut &&
       joinerRun < CONSECUTIVE_JOINER_CAP &&
+      preservedTotal < TOTAL_PRESERVED_JOINER_BUDGET &&
       isPreservedJoiner(ch, cps[i - 1] ?? "", cps[i + 1] ?? "")
     ) {
       joinerRun++;
+      preservedTotal++;
       prevVisible = false; // a joiner keeps the cluster open
       out += ch;
       continue;

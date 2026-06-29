@@ -8,6 +8,11 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
+      # The Python-client pytest drives the Node CLI bridge, so a change to the
+      # bridge (src), the bin, or the client itself must re-run this workflow.
+      - "src/**"
+      - "bin/**"
+      - "python/**"
   # No paths filter on pull_request: this is a Required check, and a workflow-level
   # path filter would skip the whole workflow (including the validate-config-passed
   # reporter) on PRs that don't touch these paths, stranding the check at
@@ -41,11 +46,46 @@ jobs:
       - name: Test Claude hooks
         run: uv run --extra dev pytest tests/
 
-  # Stable Required check: runs even when `validate` is cancelled/skipped, so a
-  # protected branch never gets stuck on a check that never reports.
+  # The Python client is a bridge to the Node CLI and uses POSIX setsid/killpg to
+  # manage the worker subprocess, so it must be exercised on every host OS and a
+  # spread of Node versions — a GNU/BSD or Node-runtime divergence in the bridge
+  # is invisible to a single-platform run. Only this test file is matrixed; the
+  # rest of the suite (config/hook validation) stays on the single `validate` job.
+  python-client:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    name: Python client (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # The OS axis is the point here: the Python client drives Node through
+      # POSIX setsid/killpg/process groups, which diverge on macOS/BSD. The Node
+      # version is pinned (not matrixed) because the repo's packageManager
+      # (pnpm@11.8.0) imports node:sqlite and so requires Node >=22.13 — a Node-20
+      # leg can't even bootstrap pnpm. The published library's Node>=20 runtime
+      # support is exercised by the consumer-style pack-smoke job instead.
+      - name: Setup base environment
+        uses: ./.github/actions/setup-base-env
+        with:
+          node-version: "22"
+          setup-python: "true"
+
+      - name: Python client tests
+        run: uv run --extra dev pytest tests/test_python_client.py
+
+  # Stable Required check: runs even when `validate`/`python-client` are
+  # cancelled/skipped, so a protected branch never gets stuck on a check that
+  # never reports. A matrix job reports many statuses; gating on this single
+  # reporter keeps one stable Required check name regardless of matrix size.
   validate-config-passed:
     if: always()
-    needs: [validate]
+    needs: [validate, python-client]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

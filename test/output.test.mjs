@@ -21,6 +21,7 @@ import {
   describeWarned,
   needsMarkdownPipeline,
   deleteVerbatimSpans,
+  MAX_DEPTH,
 } from "../src/output.mjs";
 import { cp } from "./test-helpers.mjs";
 
@@ -524,6 +525,120 @@ describe("sanitizeValue", () => {
   });
 });
 
+// ─── sanitizeValue: depth / cycle fail-closed (R3) ───────────────────────────
+
+// Build an array nested `n` deep around a single string leaf, iteratively (a
+// recursive builder would itself blow the stack at 200k). depthArray(2) is
+// [[ "leaf" ]].
+function depthArray(n, leaf = "leaf") {
+  let node = leaf;
+  for (let i = 0; i < n; i++) node = [node];
+  return node;
+}
+
+describe("sanitizeValue depth/cycle guard (R3)", () => {
+  it("does not throw on a 200k-deep array and withholds past the cap", async () => {
+    const warnings = [];
+    const r = await sanitizeValue(depthArray(200_000), {}, warnings);
+    // Descend MAX_DEPTH array levels; the cap placeholder sits at that depth.
+    let node = r.value;
+    for (let i = 0; i < MAX_DEPTH; i++) {
+      assert.ok(Array.isArray(node), `level ${i} should still be an array`);
+      node = node[0];
+    }
+    assert.equal(
+      node,
+      "[withheld: structured output nested beyond 200 levels]",
+    );
+    assert.equal(r.modified, true);
+    assert.ok(
+      warnings.some((w) => w.includes("nested beyond 200 levels")),
+      "a depth warning is recorded",
+    );
+  });
+
+  it("withholds the first container AT MAX_DEPTH; a shallower leaf survives", async () => {
+    // depthArray(n) places its innermost container at depth n-1. The withhold
+    // fires for the first CONTAINER sitting at depth >= MAX_DEPTH, so n must be
+    // MAX_DEPTH+1 for a container to reach depth MAX_DEPTH.
+    const overCap = await sanitizeValue(depthArray(MAX_DEPTH + 1), {}, []);
+    let node = overCap.value;
+    for (let i = 0; i < MAX_DEPTH; i++) node = node[0];
+    assert.equal(
+      node,
+      "[withheld: structured output nested beyond 200 levels]",
+    );
+
+    // Exactly at the boundary (innermost container at depth MAX_DEPTH-1, leaf a
+    // STRING at depth MAX_DEPTH): the string is sanitized normally — the depth
+    // guard only withholds containers, so nothing is withheld here.
+    const warnings = [];
+    const atCap = await sanitizeValue(
+      depthArray(MAX_DEPTH, `mal${ZW}ware`),
+      {},
+      warnings,
+    );
+    let leaf = atCap.value;
+    for (let i = 0; i < MAX_DEPTH; i++) leaf = leaf[0];
+    assert.equal(leaf, "malware");
+    assert.ok(!warnings.some((w) => w.includes("nested beyond")));
+  });
+
+  it("does not throw on a circular object and replaces the back-edge", async () => {
+    const node = { name: "root", child: null };
+    node.child = node; // self-reference
+    const warnings = [];
+    const r = await sanitizeValue(node, {}, warnings);
+    assert.equal(r.value.name, "root");
+    assert.equal(
+      r.value.child,
+      "[withheld: circular reference in structured output]",
+    );
+    assert.equal(r.modified, true);
+    assert.ok(warnings.some((w) => w.includes("circular reference")));
+  });
+
+  it("does not flag a value SHARED across siblings as a cycle (no false back-edge)", async () => {
+    const shared = { v: "x" };
+    const warnings = [];
+    const r = await sanitizeValue([shared, shared], {}, warnings);
+    // Both siblings sanitize as real objects — neither is a cycle placeholder.
+    assert.deepEqual(r.value, [{ v: "x" }, { v: "x" }]);
+    assert.equal(r.modified, false);
+    assert.ok(!warnings.some((w) => w.includes("circular")));
+  });
+});
+
+// ─── sanitizeValue: hidden chars in object KEYS (S5) ─────────────────────────
+
+describe("sanitizeValue key screening (S5)", () => {
+  it("flags a key carrying a ZWSP run + ESC, keeping the original key intact", async () => {
+    const hiddenKey = `std${ZW.repeat(15)}${ESC}[31mout`;
+    const warnings = [];
+    const r = await sanitizeValue({ [hiddenKey]: "clean value" }, {}, warnings);
+    // Key is NOT rewritten (precision: rewriting could collide / break schema).
+    assert.deepEqual(Object.keys(r.value), [hiddenKey]);
+    assert.equal(r.value[hiddenKey], "clean value");
+    assert.equal(r.modified, true);
+    assert.ok(
+      warnings.some((w) => w.includes("object key") && w.includes("hidden")),
+      "a key warning naming hidden chars is recorded",
+    );
+  });
+
+  it("does not flag ordinary keys (negative: clean keys stay silent)", async () => {
+    const warnings = [];
+    const r = await sanitizeValue(
+      { stdout: "ok", code: 0, nested: { a: "b" } },
+      {},
+      warnings,
+    );
+    assert.deepEqual(r.value, { stdout: "ok", code: 0, nested: { a: "b" } });
+    assert.equal(r.modified, false);
+    assert.deepEqual(warnings, []);
+  });
+});
+
 // ─── composeContext ──────────────────────────────────────────────────────────
 
 describe("composeContext", () => {
@@ -572,4 +687,21 @@ describe("suppressToolOutput", () => {
     assert.deepEqual(suppressToolOutput(["a", 1, null], MSG), [MSG, 1, null]));
   it("passes a bare non-string scalar through untouched", () =>
     assert.equal(suppressToolOutput(7, MSG), 7));
+
+  it("does not throw on a 200k-deep array; substitutes the message past the cap", () => {
+    const out = suppressToolOutput(depthArray(200_000, "leak"), MSG);
+    let node = out;
+    for (let i = 0; i < MAX_DEPTH; i++) {
+      assert.ok(Array.isArray(node));
+      node = node[0];
+    }
+    assert.equal(node, MSG);
+  });
+
+  it("does not throw on a circular object; substitutes the back-edge", () => {
+    const node = { a: "leak", self: null };
+    node.self = node;
+    const out = suppressToolOutput(node, MSG);
+    assert.deepEqual(out, { a: MSG, self: MSG });
+  });
 });

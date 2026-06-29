@@ -20,6 +20,7 @@ import {
   sanitizeText,
   sanitizeValue,
   deleteVerbatimSpans,
+  MAX_DEPTH,
 } from "../src/output.mjs";
 import { fcRunOptions, cp } from "./test-helpers.mjs";
 
@@ -45,12 +46,18 @@ const adversarialChar = fc.oneof(
     `${ESC}[31m`, // SGR fragment
     `${ESC}[0m`,
     `${ESC}[32m`,
+    `${ESC}]8;;http://x${cp(0x07)}`, // 7-bit OSC + BEL terminator
+    cp(0x009b), // 8-bit C1 CSI introducer
+    cp(0x009d), // 8-bit C1 OSC introducer
     cp(0x200b), // ZWSP (Cf)
     cp(0x200c), // ZWNJ (Cf, carve-out)
     cp(0x200d), // ZWJ (Cf, carve-out)
     cp(0xfe0f), // VS-16
     cp(0x00ad), // soft hyphen
+    cp(0x034f), // zero-width combining mark (Mn blank filler)
     cp(0x2800), // braille blank filler
+    cp(0xe0041), // Unicode TAG (deniable-encoding channel)
+    cp(0x1f600), // astral (parser totality)
   ),
 );
 const adversarialInput = fc
@@ -199,6 +206,40 @@ describe("property: sanitizeValue preserves structure", () => {
         }
         assert.equal(r.modified, changed);
       }),
+      runOptions,
+    );
+  });
+
+  // The depth fail-closed guard (R3) must never throw, regardless of how deep
+  // the random nesting goes. Drive sanitizeValue with an array nested to a
+  // random depth straddling MAX_DEPTH (some runs under, some well over) and
+  // assert it resolves to a string leaf and never blows the stack.
+  it("never throws on arbitrarily deep nesting (straddles MAX_DEPTH)", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: MAX_DEPTH * 3 }),
+        async (depth) => {
+          let node = "leaf";
+          for (let i = 0; i < depth; i++) node = [node];
+          const r = await sanitizeValue(node, {}, []);
+          // Descend min(depth, MAX_DEPTH) array levels to the innermost value.
+          let inner = r.value;
+          const levels = Math.min(depth, MAX_DEPTH);
+          for (let i = 0; i < levels; i++) {
+            assert.ok(Array.isArray(inner));
+            inner = inner[0];
+          }
+          assert.equal(typeof inner, "string");
+          // Past the cap the innermost is the withhold placeholder; otherwise
+          // the original (clean) leaf survives.
+          assert.equal(
+            inner,
+            depth > MAX_DEPTH
+              ? "[withheld: structured output nested beyond 200 levels]"
+              : "leaf",
+          );
+        },
+      ),
       runOptions,
     );
   });

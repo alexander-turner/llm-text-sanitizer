@@ -146,6 +146,32 @@ describe("occurrences (property)", () => {
         assert.deepEqual(occurrences(haystack, needle), occ(haystack, needle)),
     );
   });
+
+  it("never throws over arbitrary (haystack, needle), incl. empty/multi-char", () => {
+    // An empty needle previously looped forever and grew the result until a
+    // RangeError; assert it yields [] and that any non-empty needle returns
+    // real, in-bounds match indices. Needle length 0..6 covers empty and
+    // multi-char.
+    check(
+      fc.tuple(fc.string({ maxLength: 40 }), fc.string({ maxLength: 6 })),
+      ([haystack, needle]) => {
+        const out = occurrences(haystack, needle);
+        if (needle === "") {
+          assert.deepEqual(out, []);
+          return;
+        }
+        assert.deepEqual(out, occ(haystack, needle));
+        for (const idx of out)
+          assert.equal(haystack.slice(idx, idx + needle.length), needle);
+      },
+    );
+  });
+
+  it("returns [] for an empty needle regardless of haystack", () => {
+    check(fc.string({ maxLength: 40 }), (haystack) =>
+      assert.deepEqual(occurrences(haystack, ""), []),
+    );
+  });
 });
 
 // ─── alignDeletions ──────────────────────────────────────────────────────────

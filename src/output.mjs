@@ -286,16 +286,54 @@ export async function sanitizeText(text, options = {}) {
 }
 
 /**
+ * Maximum container nesting `sanitizeValue` / `suppressToolOutput` will descend
+ * before failing closed. The JS engine's own call-stack limit is many thousands
+ * of frames deep, so 200 is a wide safety margin below it: a real tool output
+ * never nests this far, while a hostile 200k-deep array (or a self-referential
+ * cycle) would otherwise blow the stack as an UNHANDLED async rejection — the
+ * output then escapes sanitization entirely (fail-open DoS). Past this depth the
+ * subtree is replaced with a placeholder and a warning is recorded, so the
+ * caller still emits a sanitized, flagged result instead of crashing.
+ */
+export const MAX_DEPTH = 200;
+
+const DEPTH_PLACEHOLDER = `[withheld: structured output nested beyond ${MAX_DEPTH} levels]`;
+const CYCLE_PLACEHOLDER = "[withheld: circular reference in structured output]";
+
+/**
  * Sanitize every string leaf of a tool-output value, preserving its shape (a
  * structured tool output whose shape changes would be ignored by a harness,
  * leaking the raw value). Non-string leaves pass through; `warnings`
  * accumulates across leaves. `sgrNote` is the OR across leaves.
+ *
+ * Fails CLOSED on two hostile shapes that would otherwise throw a `RangeError`
+ * as an unhandled async rejection (a DoS that leaves the output un-sanitized):
+ * nesting past {@link MAX_DEPTH}, and a reference cycle. Either replaces the
+ * offending subtree with a placeholder string + a warning, never passing the
+ * raw subtree through. Keys are also screened for hidden chars (see below).
  * @param {any} value
  * @param {SanitizeTextOptions} options
  * @param {string[]} warnings
  * @returns {Promise<{ value: any, modified: boolean, sgrNote: boolean }>}
  */
 export async function sanitizeValue(value, options, warnings) {
+  return sanitizeValueAt(value, options, warnings, 0, new WeakSet());
+}
+
+/**
+ * Recursion core for {@link sanitizeValue}, carrying the current `depth` and the
+ * `seen` set of ancestor containers on the active path (a WeakSet, so a value
+ * reused across sibling branches — legitimate sharing, not a cycle — is not
+ * mistaken for a back-edge; only a true ancestor still on the stack triggers
+ * the cycle guard, and it is removed on the way back up).
+ * @param {any} value
+ * @param {SanitizeTextOptions} options
+ * @param {string[]} warnings
+ * @param {number} depth
+ * @param {WeakSet<object>} seen
+ * @returns {Promise<{ value: any, modified: boolean, sgrNote: boolean }>}
+ */
+async function sanitizeValueAt(value, options, warnings, depth, seen) {
   if (typeof value === "string") {
     const result = await sanitizeText(value, options);
     warnings.push(...result.warnings);
@@ -305,32 +343,76 @@ export async function sanitizeValue(value, options, warnings) {
       sgrNote: result.sgrNote,
     };
   }
-  if (Array.isArray(value)) {
-    const out = [];
-    let modified = false;
-    let sgrNote = false;
-    for (const item of value) {
-      const result = await sanitizeValue(item, options, warnings);
-      out.push(result.value);
-      if (result.modified) modified = true;
-      if (result.sgrNote) sgrNote = true;
-    }
-    return { value: out, modified, sgrNote };
+  const isContainer =
+    Array.isArray(value) || (value !== null && typeof value === "object");
+  if (!isContainer) return { value, modified: false, sgrNote: false };
+
+  // Fail closed before descending into a container: a back-edge to an ancestor
+  // (cycle) or a depth past the cap is replaced with a placeholder, never the
+  // raw subtree. Both set modified so the caller flags the output as sanitized.
+  if (seen.has(value)) {
+    warnings.push("Withheld a circular reference in structured tool output");
+    return { value: CYCLE_PLACEHOLDER, modified: true, sgrNote: false };
   }
-  if (value !== null && typeof value === "object") {
+  if (depth >= MAX_DEPTH) {
+    warnings.push(
+      `Structured tool output nested beyond ${MAX_DEPTH} levels — deeper content withheld`,
+    );
+    return { value: DEPTH_PLACEHOLDER, modified: true, sgrNote: false };
+  }
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const out = [];
+      let modified = false;
+      let sgrNote = false;
+      for (const item of value) {
+        const result = await sanitizeValueAt(
+          item,
+          options,
+          warnings,
+          depth + 1,
+          seen,
+        );
+        out.push(result.value);
+        if (result.modified) modified = true;
+        if (result.sgrNote) sgrNote = true;
+      }
+      return { value: out, modified, sgrNote };
+    }
     /** @type {Record<string, any>} */
     const out = {};
     let modified = false;
     let sgrNote = false;
     for (const [key, item] of Object.entries(value)) {
-      const result = await sanitizeValue(item, options, warnings);
+      // Screen the KEY for hidden chars (Layer 1). We FLAG but do NOT rewrite:
+      // a sanitized key can collide with a sibling key (silently dropping a
+      // field) or break a downstream schema that matches on the exact name, so
+      // precision wins — we keep the original key and warn, letting an operator
+      // decide, rather than mangle the object's shape. (A clean key is silent.)
+      const { cleaned: cleanKey } = applyLayer1(key);
+      if (cleanKey !== key) {
+        modified = true;
+        warnings.push(
+          "An object key in structured tool output carried hidden/invisible characters (key left intact, value sanitized)",
+        );
+      }
+      const result = await sanitizeValueAt(
+        item,
+        options,
+        warnings,
+        depth + 1,
+        seen,
+      );
       out[key] = result.value;
       if (result.modified) modified = true;
       if (result.sgrNote) sgrNote = true;
     }
     return { value: out, modified, sgrNote };
+  } finally {
+    seen.delete(value);
   }
-  return { value, modified: false, sgrNote: false };
 }
 
 /**
@@ -357,20 +439,47 @@ export function composeContext(
  * Replace every string leaf of `value` with `message`, preserving shape so a
  * fail-closed placeholder matches the tool's output schema. Non-string leaves
  * pass through.
+ *
+ * Shares {@link sanitizeValue}'s depth/cycle guard for the same reason: this
+ * runs on the fail-closed path (an already-suspect output), so a 200k-deep or
+ * self-referential value must NOT blow the stack here — that would re-open the
+ * very hole suppression exists to close. Past {@link MAX_DEPTH} or on a cycle it
+ * substitutes `message` for the offending subtree (already the suppression
+ * sentinel, so the placeholder is consistent with the rest of the output).
  * @param {any} value
  * @param {string} message
  * @returns {any}
  */
 export function suppressToolOutput(value, message) {
+  return suppressAt(value, message, 0, new WeakSet());
+}
+
+/**
+ * Recursion core for {@link suppressToolOutput}; see {@link sanitizeValueAt} for
+ * the depth/`seen` bookkeeping rationale.
+ * @param {any} value
+ * @param {string} message
+ * @param {number} depth
+ * @param {WeakSet<object>} seen
+ * @returns {any}
+ */
+function suppressAt(value, message, depth, seen) {
   if (typeof value === "string") return message;
-  if (Array.isArray(value))
-    return value.map((item) => suppressToolOutput(item, message));
-  if (value !== null && typeof value === "object") {
+  const isContainer =
+    Array.isArray(value) || (value !== null && typeof value === "object");
+  if (!isContainer) return value;
+  if (seen.has(value) || depth >= MAX_DEPTH) return message;
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value))
+      return value.map((item) => suppressAt(item, message, depth + 1, seen));
     /** @type {Record<string, any>} */
     const out = {};
     for (const [key, item] of Object.entries(value))
-      out[key] = suppressToolOutput(item, message);
+      out[key] = suppressAt(item, message, depth + 1, seen);
     return out;
+  } finally {
+    seen.delete(value);
   }
-  return value;
 }

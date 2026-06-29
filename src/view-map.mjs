@@ -19,13 +19,16 @@
  * @returns {number[]}
  */
 export function occurrences(haystack, needle) {
+  // An empty needle has no meaningful occurrence here, and `indexOf("", k)`
+  // clamps to `haystack.length` rather than returning -1, so stepping by the
+  // needle length (0) would loop forever and grow `out` until a RangeError.
+  // Callers must never act on a zero-length match; return none.
+  if (needle === "") return [];
   const out = [];
   let i = haystack.indexOf(needle);
   while (i !== -1) {
     out.push(i);
-    // max(len, 1) so an empty needle (never produced here, but cheap to
-    // harden against) cannot loop forever.
-    i = haystack.indexOf(needle, i + Math.max(needle.length, 1));
+    i = haystack.indexOf(needle, i + needle.length);
   }
   return out;
 }

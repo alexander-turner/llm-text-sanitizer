@@ -28,6 +28,15 @@ import * as viewMap from "../src/view-map.mjs";
 import * as rehydrate from "../src/rehydrate.mjs";
 import * as output from "../src/output.mjs";
 
+import { CHECKS } from "../src/invisible.mjs";
+import {
+  THREAT_CODEPOINTS,
+  IN_SCOPE_MEMBERS,
+  acceptedSpellings,
+  spellingMatches,
+  threat,
+} from "./threat-codepoints.mjs";
+
 // Functions that ingest untrusted text/URLs/ranges and so owe a fuzz target.
 // Intentionally excluded (documented so the omission is a choice, not a miss):
 //   - isSgrOnly, looksLikeHtmlSource, isHiddenOpen, closingTagName: pure
@@ -134,6 +143,82 @@ describe("fuzz-coverage obligation gate", () => {
         hits.length > 0,
         `${name} handles untrusted input but no property/fuzz suite references it`,
       );
+    });
+  }
+});
+
+// ─── Threat-alphabet domain coverage ─────────────────────────────────────────
+// A fuzz target EXISTING (above) does not prove its input DOMAIN reaches the
+// dangerous bytes — a uniform unicode draw lands on U+009B ~1-in-a-million, so a
+// suite can run forever and never exercise the C1 passthrough class. This block
+// asserts each in-scope suite's SOURCE seeds every THREAT_CODEPOINTS member it
+// owes (by any hex/escape spelling), the trap the U+009B bug fell through.
+
+const fuzzFileByName = new Map(fuzzFiles.map((file) => [file.name, file]));
+
+describe("threat-alphabet domain coverage", () => {
+  it("every invisible-detector category (CHECKS) has a representative cp", () => {
+    const represented = new Set(
+      THREAT_CODEPOINTS.map((entry) => entry.category),
+    );
+    for (const [category] of CHECKS)
+      assert.ok(
+        represented.has(category),
+        `CHECKS category '${category}' has no THREAT_CODEPOINTS representative — add one so the gate exercises it`,
+      );
+  });
+
+  it("every IN_SCOPE suite file actually exists and drives fast-check", () => {
+    for (const name of Object.keys(IN_SCOPE_MEMBERS))
+      assert.ok(
+        fuzzFileByName.has(name),
+        `IN_SCOPE names '${name}' but no such fast-check suite was discovered — stale entry or renamed file`,
+      );
+  });
+
+  it("every IN_SCOPE member is a real THREAT_CODEPOINTS entry (no typo'd cp)", () => {
+    for (const [name, members] of Object.entries(IN_SCOPE_MEMBERS))
+      for (const cp of members)
+        // threat() throws on an unknown cp, so a hand-typed 0x9bb in an in-scope
+        // array fails loud here rather than as an unsatisfiable "never seeds" later.
+        assert.equal(
+          threat(cp).cp,
+          cp,
+          `IN_SCOPE['${name}'] names 0x${cp.toString(16)}, not in THREAT_CODEPOINTS`,
+        );
+  });
+
+  it("spellingMatches anchors on hex boundaries (no prefix false positives)", () => {
+    // Positive: each accepted spelling of a representative cp matches itself.
+    assert.ok(spellingMatches(0x9b, "cp(0x9b)"));
+    assert.ok(spellingMatches(0x9b, "cp(0x009b)"));
+    assert.ok(spellingMatches(0x07, "cp(0x07)"));
+    assert.ok(spellingMatches(0x1f600, "\\u{1f600}"));
+    assert.ok(spellingMatches(0x200b, "\\u200b"));
+    // Negative: a shorter cp must NOT match as a prefix of a longer hex literal —
+    // the U+0007 (0x7) vs the 0x7e ASCII bound is the exact false positive the
+    // boundary lookahead exists to kill.
+    assert.equal(spellingMatches(0x07, "min: 0x20, max: 0x7e"), false);
+    assert.equal(spellingMatches(0x9b, "cp(0x9bc)"), false);
+    assert.equal(spellingMatches(0x9b, "\\u009bc"), false);
+  });
+
+  for (const [name, members] of Object.entries(IN_SCOPE_MEMBERS)) {
+    it(`'${name}' seeds every in-scope threat code point`, () => {
+      const file = fuzzFileByName.get(name);
+      assert.ok(file, `suite ${name} not found`);
+      // A non-empty in-scope set (asserted) over a non-empty source means each
+      // pass below is a real per-member check, not a vacuous zero-iteration loop.
+      assert.ok(members.length > 0, `${name} has an empty in-scope set`);
+      assert.ok(file.code.length > 0, `${name} stripped to empty source`);
+      const haystack = file.code.toLowerCase();
+      for (const cp of members)
+        assert.ok(
+          spellingMatches(cp, haystack),
+          `${name} never seeds threat cp 0x${cp.toString(16)} ` +
+            `(no spelling of ${JSON.stringify(acceptedSpellings(cp))} in its source) — ` +
+            `the fuzzer cannot reach it by chance, so the regression class is unguarded`,
+        );
     });
   }
 });

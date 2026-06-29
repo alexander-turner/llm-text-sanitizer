@@ -36,6 +36,7 @@ const structuralToken = fc.constantFrom(
   `${ESC}[0m`,
   `${ESC}]8;;http://x${cp(0x07)}`, // OSC-with-BEL
   cp(0x009b), // 8-bit C1 CSI introducer
+  cp(0x009d), // 8-bit C1 OSC introducer
   cp(0x200b), // ZWSP
   cp(0x200c), // ZWNJ
   cp(0x200d), // ZWJ
@@ -43,8 +44,11 @@ const structuralToken = fc.constantFrom(
   cp(0x00ad), // soft hyphen
   cp(0xfe0f), // VS-16
   cp(0xe0101), // supplementary VS
+  cp(0x034f), // zero-width combining mark (Mn blank filler)
   cp(0x3164), // Hangul filler
   cp(0x2800), // braille blank
+  cp(0xe0041), // Unicode TAG (deniable-encoding channel)
+  cp(0x1f600), // astral (parser totality)
 );
 const adversarialChar = fc.oneof(anyCodePoint, loneSurrogate, structuralToken);
 const adversarialInput = fc
