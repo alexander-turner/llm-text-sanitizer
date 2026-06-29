@@ -8,6 +8,17 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.3.0] - 2026-06-29
+
+### Added
+
+- Python client is now installable via `pyproject.toml`, with a README for setup and usage.
+- Cross-language golden tests for process lifecycle validation across Python and Node.js implementations.
+
+### Fixed
+
+- Named regex group for grandchild-pid matching in test utilities.
+
 ## [1.2.16] - 2026-06-29
 
 ### Fixed
