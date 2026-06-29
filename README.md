@@ -2,7 +2,7 @@
 
 Sanitize untrusted text **before any model sees it**—in an agent, RAG, or
 tool-use pipeline. It cleans bytes, not prompts, so it’s provider-agnostic:
-every entry point is a pure transform or takes an **injected** I/O/engine seam,
+every entry point is a pure transform or takes an **injected** input / output / engine seam,
 with nothing about a specific agent harness (Claude, or any other) baked in.
 
 ```sh
@@ -104,7 +104,7 @@ await rehydrateRedacted("Edit", toolInput, {
 ## Non-JS pipelines (Python, etc.)
 
 The JS is the **single source of truth**—non-JS callers drive the same verdicts
-through the bundled CLI (JSON over stdin/stdout, Node ≥20 on `PATH`), so there’s
+through the bundled CLI, so there’s
 no second implementation to drift. An `op` field selects the entry point
 (default `sanitize`); the self-contained ones—`sanitizeText`, `classifyPrompt`,
 `scanInstructionFiles`, `cleanFile`—are all bridged. Entry points with an
@@ -118,12 +118,11 @@ sanitize-cli --worker                              # newline-delimited, one resp
 
 The [`python/`](./python) client wraps every bridged op (`sanitize`,
 `sanitize_text`, `classify_prompt`, `scan_instruction_files`, `clean_file`). It
-requires **Node ≥20 on `PATH`** and, today, resolves the bundled CLI relative to
+resolves the bundled CLI relative to
 its own source tree—so it runs from a repo checkout, not yet a `pip install`. The
 first `html=True` call starts a shared worker, so the ~200 ms HTML module-load
 is paid **once per process**; Layer-1 calls stay one-shot. `persist=True/False`
-forces the mode and `shutdown_worker()` (also an `atexit` hook) stops it. Missing
-Node or a missing CLI fails loudly—a pure-Python port _is_ the drift this avoids.
+forces the mode and `shutdown_worker()` (also an `atexit` hook) stops it. 
 
 ```python
 from agent_input_sanitizer import sanitize, Sanitizer

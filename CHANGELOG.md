@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.4.1] - 2026-06-29
+
+### Changed
+
+- Update README.md
+
 ## [1.4.0] - 2026-06-29
 
 ### Changed
