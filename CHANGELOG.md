@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.2.16] - 2026-06-29
+
+### Fixed
+
+- Prompt classification now blocks 8-bit C1 CSI/OSC ANSI introducers to maintain consistent security with the sanitizer's ANSI detection.
+
 ## [1.2.15] - 2026-06-29
 
 ### Added
