@@ -46,12 +46,18 @@ const adversarialChar = fc.oneof(
     `${ESC}[31m`, // SGR fragment
     `${ESC}[0m`,
     `${ESC}[32m`,
+    `${ESC}]8;;http://x${cp(0x07)}`, // 7-bit OSC + BEL terminator
+    cp(0x009b), // 8-bit C1 CSI introducer
+    cp(0x009d), // 8-bit C1 OSC introducer
     cp(0x200b), // ZWSP (Cf)
     cp(0x200c), // ZWNJ (Cf, carve-out)
     cp(0x200d), // ZWJ (Cf, carve-out)
     cp(0xfe0f), // VS-16
     cp(0x00ad), // soft hyphen
+    cp(0x034f), // zero-width combining mark (Mn blank filler)
     cp(0x2800), // braille blank filler
+    cp(0xe0041), // Unicode TAG (deniable-encoding channel)
+    cp(0x1f600), // astral (parser totality)
   ),
 );
 const adversarialInput = fc
