@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import fc from "fast-check";
@@ -56,6 +56,27 @@ const CASES = [
     html: true,
   },
 ];
+
+describe("CLI: invoked through a symlinked bin (published-package shape)", () => {
+  // npm installs the `sanitize-cli` bin as a symlink under node_modules/.bin,
+  // so a consumer launches the CLI via a path that is NOT this module's real
+  // file. The script-detection guard must resolve real paths; a raw URL compare
+  // makes `invokedAsScript` false and the CLI emits nothing (silent break).
+  it("runs and returns a response when launched through a symlink", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "ais-cli-bin-"));
+    const link = path.join(dir, "sanitize-cli");
+    symlinkSync(CLI, link);
+    const out = execFileSync("node", [link], {
+      input: '{"text":"a​b"}',
+      encoding: "utf8",
+    });
+    assert.deepEqual(JSON.parse(out), {
+      cleaned: "ab",
+      found: ["cf-format"],
+      warnings: ["Stripped: Format chars (Cf)"],
+    });
+  });
+});
 
 describe("CLI: one-shot mode mirrors sanitize()", () => {
   for (const { name, text, html } of CASES) {

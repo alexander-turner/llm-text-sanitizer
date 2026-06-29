@@ -44,8 +44,9 @@
  * serving. Raise or lower the limit via that environment variable.
  */
 import { Buffer } from "node:buffer";
+import { realpathSync } from "node:fs";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { sanitize } from "../src/index.mjs";
 
@@ -325,10 +326,24 @@ async function runOneShot() {
 
 // Run only when invoked as a script, not when imported (a unit test imports
 // `createLineSplitter` directly and must not have the worker consume its stdin).
-const invokedAsScript =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
-if (invokedAsScript)
+// Compare REAL paths: the published bin is launched through a
+// `node_modules/.bin/sanitize-cli` symlink, so `process.argv[1]` is the symlink
+// path while `import.meta.url` is this module's real file — a raw URL compare
+// would be false and the CLI would silently produce no output. `realpathSync`
+// resolves both to the same on-disk file. A non-existent `argv[1]` (e.g. an
+// `--eval` entry) throws ENOENT and is treated as "not our script".
+function invokedAsScript() {
+  if (process.argv[1] === undefined) return false;
+  try {
+    return (
+      realpathSync(process.argv[1]) ===
+      realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+if (invokedAsScript())
   await (process.argv.includes("--worker") ? runWorker() : runOneShot());
 
 export { createLineSplitter };
