@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.4.2] - 2026-06-29
+
+### Changed
+
+- ci(hooks): add auto-fixing pre-push hook; strip README trailing whitespace
+- chore(package): add author field for attribution
+
 ## [1.4.1] - 2026-06-29
 
 ### Changed
