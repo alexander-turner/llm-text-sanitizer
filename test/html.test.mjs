@@ -158,6 +158,18 @@ describe("unit: isHiddenStyle exact verdicts", () => {
   for (const [style, expectedHidden] of HIDDEN_STYLE_CASES)
     it(`${expectedHidden ? "flags" : "leaves"} ${JSON.stringify(style)}`, () =>
       assert.equal(isHiddenStyle(style), expectedHidden));
+
+  // A CSS value matching an Object.prototype member must not poison the named-
+  // color lookup (`in` would return an inherited object/function); it is just an
+  // unknown color and the declaration is visible.
+  for (const proto of [
+    "__proto__",
+    "constructor",
+    "toString",
+    "hasOwnProperty",
+  ])
+    it(`returns false (not a poisoned non-boolean) for color:${proto}`, () =>
+      assert.equal(isHiddenStyle(`background:${proto}`), false));
 });
 
 describe("unit: isHiddenElement exact verdicts", () => {

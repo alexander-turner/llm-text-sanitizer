@@ -1,0 +1,16 @@
+[
+  { "id": "html-1", "mutate": "src/html.mjs:1-150" },
+  { "id": "html-2", "mutate": "src/html.mjs:151-300" },
+  { "id": "html-3", "mutate": "src/html.mjs:301-600" },
+  { "id": "html-4", "mutate": "src/html.mjs:601-900" },
+  { "id": "html-5", "mutate": "src/html.mjs:901-99999" },
+  { "id": "output", "mutate": "src/output.mjs" },
+  { "id": "rehydrate", "mutate": "src/rehydrate.mjs" },
+  { "id": "invisible-index", "mutate": "src/invisible.mjs,src/index.mjs" },
+  {
+    "id": "instructions-gates",
+    "mutate": "src/instructions.mjs,src/gates.mjs"
+  },
+  { "id": "viewmap-prompt", "mutate": "src/view-map.mjs,src/prompt.mjs" },
+  { "id": "confusables-layer1", "mutate": "src/confusables.mjs,src/layer1.mjs" }
+]

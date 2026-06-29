@@ -8,13 +8,17 @@ on:
       - "test/**/*.mjs"
       - "stryker.conf.json"
       - "package.json"
+      - ".github/mutation-shards.json"
       - ".github/workflows/mutation.yaml"
       - ".github/scripts/mutation-changed.sh"
+      - ".github/scripts/run-mutation-shard.sh"
+      - ".github/scripts/aggregate-mutation.mjs"
   # No paths filter on pull_request: this is a Required check, and a workflow-level
   # path filter would skip the whole workflow (including the mutation-passed
   # reporter) on PRs that don't touch these paths, stranding the check at
-  # "Expected — Waiting". The job below cheaply no-ops via mutation-changed.sh
-  # when nothing mutation-relevant changed, so the gate still reports green.
+  # "Expected — Waiting". The changes job below cheaply no-ops via
+  # mutation-changed.sh when nothing mutation-relevant changed, so the gate still
+  # reports green.
   pull_request:
 
 concurrency:
@@ -25,12 +29,14 @@ permissions:
   contents: read
 
 jobs:
-  mutation:
+  # Cheap gate: decide whether the expensive shards run at all, and hand the
+  # shard matrix to the mutation job from the committed shard list.
+  changes:
     runs-on: ubuntu-latest
-    # Stryker re-runs the suite once per mutant; the full project is ~1200
-    # mutants at a few seconds each across 4 workers. 30 min is comfortable
-    # headroom over the observed ~12 min wall time.
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.changed.outputs.run }}
+      shards: ${{ steps.shards.outputs.shards }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -52,28 +58,112 @@ jobs:
             echo "::notice::No mutation-relevant files changed, skipping Stryker"
           fi
 
+      - name: Load shard matrix
+        id: shards
+        run: echo "shards=$(jq -c . .github/mutation-shards.json)" >> "$GITHUB_OUTPUT"
+
+  # The ~2473 mutants are split into disjoint slices (line ranges for the big
+  # files, whole files for the rest) so the slices run in parallel across
+  # runners. Each shard runs Stryker incrementally with the break threshold
+  # disabled and uploads its JSON report; the aggregate job sums them into the
+  # real, project-wide score and applies the gate.
+  mutation:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Mutation testing needs a deterministic oracle: Stryker aborts a shard if
+    # any test fails in its initial dry run, so a randomized property test that
+    # rolls a counterexample on one shard's seed would flake the whole gate.
+    # FC_REPRODUCIBLE pins fast-check to the fixed seed (see test/test-helpers.mjs)
+    # so every shard's dry run is stable and green.
+    env:
+      FC_REPRODUCIBLE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.changes.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
       - name: Setup base environment
-        if: steps.changed.outputs.run == 'true'
         uses: ./.github/actions/setup-base-env
 
-      - name: Run mutation testing
-        if: steps.changed.outputs.run == 'true'
-        run: pnpm test:mutation
+      # Restore this shard's incremental result file so only mutants whose source
+      # or covering tests changed since the last run are re-evaluated; the rest
+      # reuse their prior verdict. Per-shard key (slices are disjoint, so their
+      # incremental files must not collide); prefix restore-keys pull the most
+      # recent entry for this shard, including the baseline saved on main.
+      - name: Restore Stryker incremental cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-incremental-${{ matrix.shard.id }}-${{ github.run_id }}
+          restore-keys: |
+            stryker-incremental-${{ matrix.shard.id }}-
 
-      - name: Upload mutation report
-        if: ${{ always() && steps.changed.outputs.run == 'true' }}
+      - name: Run mutation testing shard
+        env:
+          MUTATE: ${{ matrix.shard.mutate }}
+        run: bash .github/scripts/run-mutation-shard.sh
+
+      - name: Save Stryker incremental cache
+        if: ${{ always() && hashFiles('reports/stryker-incremental.json') != '' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-incremental-${{ matrix.shard.id }}-${{ github.run_id }}
+
+      - name: Upload shard report
+        if: ${{ always() && hashFiles('reports/mutation/mutation.json') != '' }}
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: mutation-report
-          path: reports/mutation/
-          if-no-files-found: ignore
+          name: mutation-report-${{ matrix.shard.id }}
+          path: reports/mutation/mutation.json
           retention-days: 14
 
-  # Stable Required check: runs even when `mutation` is cancelled/skipped, so a
-  # protected branch never gets stuck on a check that never reports.
+  # Sum every shard's JSON into the project-wide mutation score and apply the
+  # break threshold from stryker.conf.json. This is the real gate; the shards
+  # themselves run with break disabled.
+  aggregate:
+    needs: [changes, mutation]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Skip when shards did not run
+        if: needs.changes.outputs.run != 'true'
+        run: echo "::notice::No mutation-relevant files changed, nothing to aggregate"
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        if: needs.changes.outputs.run == 'true'
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        if: needs.changes.outputs.run == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Download shard reports
+        if: needs.changes.outputs.run == 'true'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: mutation-report-*
+          path: shard-reports
+
+      - name: Aggregate and apply threshold
+        if: needs.changes.outputs.run == 'true'
+        run: node .github/scripts/aggregate-mutation.mjs shard-reports
+
+  # Stable Required check: runs even when upstream jobs are cancelled/skipped, so
+  # a protected branch never gets stuck on a check that never reports.
   mutation-passed:
     if: always()
-    needs: [mutation]
+    needs: [changes, mutation, aggregate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

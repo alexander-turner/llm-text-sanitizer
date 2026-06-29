@@ -152,7 +152,11 @@ const NAMED_COLORS = {
 function canonicalizeColor(raw) {
   const value = raw.trim().toLowerCase();
   if (!value) return "";
-  if (value in NAMED_COLORS) return NAMED_COLORS[value];
+  // Own-key only: `in` would match inherited members, so a CSS value of
+  // `__proto__`/`constructor`/`toString` returns an object or function here
+  // (poisoning isHiddenStyle's return) instead of falling through as a plain
+  // string.
+  if (Object.hasOwn(NAMED_COLORS, value)) return NAMED_COLORS[value];
   const shortHex = value.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/);
   if (shortHex)
     return `#${shortHex[1]}${shortHex[1]}${shortHex[2]}${shortHex[2]}${shortHex[3]}${shortHex[3]}`;

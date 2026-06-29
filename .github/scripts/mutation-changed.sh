@@ -28,4 +28,4 @@ fi
 changed=$(git diff --name-only "$base" "$head" --)
 
 printf '%s\n' "$changed" | grep -qE \
-  '^(src/.*\.mjs|test/.*\.mjs|stryker\.conf\.json|package\.json|\.github/(workflows/mutation\.yaml|scripts/mutation-changed\.sh))$'
+  '^(src/.*\.mjs|test/.*\.mjs|stryker\.conf\.json|package\.json|\.github/mutation-shards\.json|\.github/workflows/mutation\.yaml|\.github/scripts/(mutation-changed|run-mutation-shard)\.sh|\.github/scripts/aggregate-mutation\.mjs)$'
