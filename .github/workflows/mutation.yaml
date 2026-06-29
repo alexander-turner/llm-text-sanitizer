@@ -56,9 +56,33 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         uses: ./.github/actions/setup-base-env
 
+      # Restore Stryker's incremental result file so only mutants whose source or
+      # covering tests changed since the last run are re-evaluated; unchanged
+      # mutants reuse their prior verdict. PRs can read the cache saved on main
+      # (and on their own branch), so a first PR run already benefits from the
+      # baseline. Unique save key + prefix restore-keys = "always restore the
+      # most recent, always save a fresh entry" (cache keys are immutable).
+      - name: Restore Stryker incremental cache
+        if: steps.changed.outputs.run == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-incremental-${{ github.run_id }}
+          restore-keys: |
+            stryker-incremental-
+
       - name: Run mutation testing
         if: steps.changed.outputs.run == 'true'
         run: pnpm test:mutation
+
+      # Persist the updated incremental file for the next run. Save on success or
+      # failure (a threshold break still leaves a valid, freshly written file).
+      - name: Save Stryker incremental cache
+        if: ${{ always() && steps.changed.outputs.run == 'true' && hashFiles('reports/stryker-incremental.json') != '' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-incremental-${{ github.run_id }}
 
       - name: Upload mutation report
         if: ${{ always() && steps.changed.outputs.run == 'true' }}
