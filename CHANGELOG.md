@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.3.2] - 2026-06-29
+
+### Fixed
+
+- HTML parser now fails closed on overflow and detects exponent/negative CSS and base64url exfiltration attempts.
+
 ## [1.3.0] - 2026-06-29
 
 ### Added
