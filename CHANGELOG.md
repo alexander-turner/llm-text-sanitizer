@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.3.4] - 2026-06-29
+
+### Changed
+
+- docs(readme): wrap THREAT-MODEL.md filename in code
+
 ## [1.3.3] - 2026-06-29
 
 ### Fixed
