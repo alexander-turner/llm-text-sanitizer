@@ -638,6 +638,25 @@ describe("createLineSplitter", () => {
     for (const cs of [1, 2, 3, 5, 7, 13]) assert.deepEqual(kinds(cs), oneShot);
   });
 
+  it("reassembles a multi-slice line byte-for-byte", () => {
+    // The line spans thousands of 1-byte chunks, so the splitter holds it as a
+    // LIST of slices and joins them once at the newline (the O(n) accumulation
+    // that replaced a per-segment Buffer.concat). Pin that the join reconstructs
+    // the exact bytes — ASCII only, so no chunk boundary lands mid-codepoint.
+    const line = "x".repeat(5000);
+    assert.deepEqual(splitAll(`${line}\n`, 1_000_000, 1), [
+      { kind: "line", text: line },
+    ]);
+  });
+
+  it("strips a trailing CR delivered as its own chunk", () => {
+    // CRLF fed byte-by-byte: the CR is the final slice, so the trailing-CR strip
+    // must inspect the JOINED line's last byte, not a single accumulator's.
+    assert.deepEqual(splitAll("abc\r\n", 100, 1), [
+      { kind: "line", text: "abc" },
+    ]);
+  });
+
   it("property: # line events == # in-cap lines; framing chunk-invariant", () => {
     // Domain: random lines (some > cap), joined by \\n, fed at random chunk
     // sizes. INVARIANTS: (1) total events == number of input lines (one response

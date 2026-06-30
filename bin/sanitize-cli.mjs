@@ -198,13 +198,32 @@ async function readAll(stream) {
  * @param {number} limit  per-line byte cap (`maxInputBytes()`)
  */
 function createLineSplitter(limit) {
-  // `buffer` holds the bytes of the current line while it's still under the cap.
-  // The moment appending the next segment would push its byte length over
-  // `limit`, `buffer` is freed and `discarding` flips: from there we scan only
-  // for the terminating `\n`, never re-accumulating, so peak buffering for one
-  // line is bounded by `limit` regardless of how long the line runs.
-  let buffer = Buffer.alloc(0);
+  // The bytes of the current line are held as a LIST of chunk slices plus their
+  // running total, joined into one Buffer only when the line completes. Pushing
+  // a slice is O(1), so assembling an N-byte line costs O(N) overall. The old
+  // single growing `Buffer.concat([buffer, segment])` per segment re-copied the
+  // whole accumulated prefix each time — O(N^2) for a line streamed as many
+  // small chunks (e.g. a multi-MiB line arriving in 1-byte reads). `discarding`
+  // still caps peak buffering at `limit`: once a line would breach it, the
+  // pending slices are dropped and we scan only for the terminating `\n`.
+  /** @type {Buffer[]} */
+  let pending = [];
+  let pendingLen = 0;
   let discarding = false;
+
+  /** Drop any pending slices (line abandoned or fully consumed). */
+  const reset = () => {
+    pending = [];
+    pendingLen = 0;
+  };
+
+  /** Join the pending slices into one line buffer (single copy) and reset. */
+  const take = () => {
+    const buf =
+      pending.length === 1 ? pending[0] : Buffer.concat(pending, pendingLen);
+    reset();
+    return buf;
+  };
 
   /** Strip one trailing `\r` so CRLF input frames identically to LF. */
   const toLine = (buf) => {
@@ -213,17 +232,20 @@ function createLineSplitter(limit) {
   };
 
   // Fold one segment (the bytes of the current line seen so far in this chunk)
-  // into `buffer`, flipping to `discarding` if it would breach the cap. Applies
-  // identically to a newline-terminated segment and to the unterminated tail, so
-  // an oversize line is caught WITHIN a chunk, not only at its trailing edge.
+  // into the pending list, flipping to `discarding` if it would breach the cap.
+  // Applies identically to a newline-terminated segment and to the unterminated
+  // tail, so an oversize line is caught WITHIN a chunk, not only at its edge.
   const accumulate = (segment) => {
     if (discarding) return;
-    if (buffer.length + segment.length > limit) {
-      buffer = Buffer.alloc(0);
+    if (pendingLen + segment.length > limit) {
+      reset();
       discarding = true;
       return;
     }
-    if (segment.length > 0) buffer = Buffer.concat([buffer, segment]);
+    if (segment.length > 0) {
+      pending.push(segment);
+      pendingLen += segment.length;
+    }
   };
 
   /** Feed one chunk, returning the events it completes (newline-terminated). */
@@ -236,10 +258,10 @@ function createLineSplitter(limit) {
       if (discarding) {
         events.push({ kind: "oversize" });
         discarding = false;
+        reset();
       } else {
-        events.push({ kind: "line", text: toLine(buffer) });
+        events.push({ kind: "line", text: toLine(take()) });
       }
-      buffer = Buffer.alloc(0);
       start = i + 1;
     }
     accumulate(chunk.subarray(start));
@@ -254,12 +276,11 @@ function createLineSplitter(limit) {
   push.end = () => {
     if (discarding) {
       discarding = false;
+      reset();
       return [{ kind: "oversize" }];
     }
-    if (buffer.length === 0) return [];
-    const event = { kind: "line", text: toLine(buffer) };
-    buffer = Buffer.alloc(0);
-    return [event];
+    if (pendingLen === 0) return [];
+    return [{ kind: "line", text: toLine(take()) }];
   };
 
   return push;
