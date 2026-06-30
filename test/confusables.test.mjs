@@ -158,6 +158,16 @@ describe("foldConfusables", () => {
     );
   });
 
+  it("throws on a non-integer index", () => {
+    assert.throws(
+      () =>
+        foldConfusables("abc", [
+          { index: 1.5, char: "b", latinEquivalent: "x" },
+        ]),
+      /out-of-range index 1\.5/,
+    );
+  });
+
   it("throws when latinEquivalent is non-ASCII (fold would stay a confusable)", () => {
     // Adversarial scanner: "fold" Cyrillic а to Cyrillic е — still a homoglyph,
     // so the cross-script deny-rule bypass would survive. Must fail loud.
