@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.4.5] - 2026-06-30
+
+### Added
+
+- Added audit-and-parallelize skill for verified hunt-and-fix audits.
+
 ## [1.4.4] - 2026-06-30
 
 ### Added
