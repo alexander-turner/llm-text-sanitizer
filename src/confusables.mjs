@@ -104,10 +104,30 @@ export function foldConfusables(text, findings) {
     // Fail loud on a finding that does not match the actual bytes at its offset:
     // a buggy/adversarial scanner reporting a wrong char/index would otherwise
     // silently corrupt the path/command, defeating the deny-rule protection.
+    // A negative index is the gap the startsWith guard alone misses: when `char`
+    // is a prefix of the text, `startsWith(char, -1)` is true (the offset is
+    // clamped to 0), and the slice math below then mangles the string instead of
+    // throwing — so range-check the index explicitly first.
+    if (!Number.isInteger(finding.index) || finding.index < 0)
+      throw new Error(
+        `Confusable finding has an out-of-range index ${finding.index}`,
+      );
     if (!folded.startsWith(finding.char, finding.index))
       throw new Error(
         `Confusable finding does not match input at index ${finding.index}: expected ${JSON.stringify(finding.char)}`,
       );
+    // The replacement must be the ASCII canon the contract promises. A non-ASCII
+    // `latinEquivalent` would fold one confusable into ANOTHER look-alike (e.g.
+    // Cyrillic а → Cyrillic е), defeating the whole point — the cross-script
+    // deny-rule bypass would survive — and silently break the fold-to-ASCII
+    // invariant callers rely on, so reject it loudly.
+    for (const ch of finding.latinEquivalent)
+      if (/** @type {number} */ (ch.codePointAt(0)) > 0x7f)
+        throw new Error(
+          `Confusable latinEquivalent ${JSON.stringify(
+            finding.latinEquivalent,
+          )} is not ASCII`,
+        );
     folded =
       folded.slice(0, finding.index) +
       finding.latinEquivalent +

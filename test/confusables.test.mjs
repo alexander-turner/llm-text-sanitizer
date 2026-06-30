@@ -145,6 +145,50 @@ describe("foldConfusables", () => {
       "/a",
     );
   });
+
+  it("throws on a negative index instead of silently corrupting the text", () => {
+    // startsWith(char, -1) clamps to 0 and returns true when `char` is a prefix,
+    // so without the explicit range check this used to splice to "abxabc".
+    assert.throws(
+      () =>
+        foldConfusables("abc", [
+          { index: -1, char: "a", latinEquivalent: "x" },
+        ]),
+      /out-of-range index -1/,
+    );
+  });
+
+  it("throws on a non-integer index", () => {
+    assert.throws(
+      () =>
+        foldConfusables("abc", [
+          { index: 1.5, char: "b", latinEquivalent: "x" },
+        ]),
+      /out-of-range index 1\.5/,
+    );
+  });
+
+  it("throws when latinEquivalent is non-ASCII (fold would stay a confusable)", () => {
+    // Adversarial scanner: "fold" Cyrillic а to Cyrillic е — still a homoglyph,
+    // so the cross-script deny-rule bypass would survive. Must fail loud.
+    const CYR_E = "е";
+    assert.throws(
+      () =>
+        foldConfusables(`/${CYR_A}b`, [
+          { index: 1, char: CYR_A, latinEquivalent: CYR_E },
+        ]),
+      /is not ASCII/,
+    );
+  });
+
+  it("allows a multi-character ASCII canon (e.g. a ligature fold)", () => {
+    // Precision: a legitimate one-to-many ASCII fold (½ → 1/2, œ → oe) must NOT
+    // be rejected by the ASCII guard — only non-ASCII replacements are refused.
+    assert.equal(
+      foldConfusables("½ x", [{ index: 0, char: "½", latinEquivalent: "1/2" }]),
+      "1/2 x",
+    );
+  });
 });
 
 // ─── normalizeConfusables: folding positive cases ────────────────────────────

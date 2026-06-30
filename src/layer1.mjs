@@ -8,12 +8,17 @@
  */
 import { stripInvisibleWithReport, CATEGORY } from "./invisible.mjs";
 
-// The two raw control introducers an ANSI sequence can start with: 7-bit
-// ESC (U+001B) and the 8-bit C1 CSI (U+009B). Both are category Cc, so the
-// invisible-char pass (which targets Cf / variation / blank fillers) never
-// removes them; the residual sweep below is what guarantees neither survives.
+// Raw control introducers that must not survive: 7-bit ESC (U+001B) and the
+// entire 8-bit C1 control block (U+0080–U+009F) — which includes CSI (U+009B),
+// the string introducers DCS/SOS/OSC/PM/APC (U+0090/0098/009D/009E/009F), and ST
+// (U+009C). All are category Cc, so the invisible-char pass (which targets Cf /
+// variation / blank fillers) never removes them; this residual sweep is the
+// guarantee that none survives. Sweeping the whole C1 block — not just the
+// introducers the ANSI grammar above names — fails closed: a DCS/SOS/PM/APC
+// string the grammar does not consume still loses its introducer and terminator
+// here, so no terminal can hide-render its body as a control payload.
 // eslint-disable-next-line no-control-regex -- matching the raw introducers is the point
-const CONTROL_INTRODUCER_RE = /[\u001b\u009b]/g;
+const CONTROL_INTRODUCER_RE = /[\u001b\u0080-\u009f]/g;
 
 // An OSC (Operating System Command) string is `<introducer> … <terminator>`.
 // Introducer: 7-bit `ESC]` or 8-bit C1 OSC (U+009D). Terminator: ST (`ESC\` or
@@ -89,7 +94,8 @@ export function stripAnsiFully(input) {
 
 /**
  * Layer 1: ANSI + invisible-char strip with a result guaranteed free of every
- * raw ANSI control introducer (7-bit ESC U+001B and 8-bit C1 CSI U+009B).
+ * raw ANSI control introducer (7-bit ESC U+001B and the whole 8-bit C1 control
+ * block U+0080–U+009F: CSI, the DCS/SOS/OSC/PM/APC string introducers, and ST).
  *
  * Removing an invisible character can reconstitute an escape its split hid from
  * the ANSI pass (`ESC`<ZWSP>`[32m` → `ESC[32m`), so strip ANSI again after the
