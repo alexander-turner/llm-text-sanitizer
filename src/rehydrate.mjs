@@ -47,7 +47,7 @@ export const DEFAULT_HINT = "[REDACTED";
  * Map-mode response from the redactor: either the mappable view (text + ordered
  * (placeholder, original, start) pairs) or an unmappable verdict carrying its
  * reason — a discriminated pair.
- * @typedef {{text: string, pairs: {placeholder: string, original: string, start: number}[], found?: string[]}
+ * @typedef {{text: string, pairs: {placeholder: string, original: string, start: number}[]}
  *   | {unmappable: string}} RedactMapView
  */
 
