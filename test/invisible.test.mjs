@@ -616,6 +616,37 @@ describe("applyLayer1: OSC strings and C1 sequences", () => {
     });
   }
 
+  // DCS/SOS/PM/APC are the other ECMA-48 string controls. The OSC/CSI grammar
+  // does not consume them, so the residual C1 sweep is what guarantees their
+  // introducer and terminator never survive into the model's view (the body
+  // text remains — it is now equally visible to a human, the point of the fix).
+  const C1_DCS = cp(0x90);
+  const C1_SOS = cp(0x98);
+  const C1_PM = cp(0x9e);
+  const C1_APC = cp(0x9f);
+  for (const [name, input] of [
+    ["7-bit DCS (ESC P … ST)", `before${ESC}P1;2;3|PAYLOAD${ST}after`],
+    ["7-bit APC (ESC _ … ST)", `x${ESC}_hidden-cmd${ST}y`],
+    ["7-bit PM (ESC ^ … ST)", `x${ESC}^secret${ST}y`],
+    ["7-bit SOS (ESC X … ST)", `x${ESC}Xboo${ST}y`],
+    ["8-bit DCS (U+0090 … C1 ST)", `x${C1_DCS}PAYLOAD${C1_ST}y`],
+    ["8-bit APC (U+009F … C1 ST)", `x${C1_APC}hidden-cmd${C1_ST}y`],
+    ["8-bit PM (U+009E … C1 ST)", `x${C1_PM}secret${C1_ST}y`],
+    ["8-bit SOS (U+0098 … C1 ST)", `x${C1_SOS}boo${C1_ST}y`],
+    ["unterminated 8-bit APC", `x${C1_APC}dangling-payload`],
+  ]) {
+    it(`leaves no C1 control for the string control: ${name}`, () => {
+      const { cleaned } = applyLayer1(input);
+      for (const ch of cleaned) {
+        const code = ch.codePointAt(0);
+        assert.ok(
+          (code < 0x80 || code > 0x9f) && code !== 0x1b,
+          `control U+${code.toString(16)} survived in ${name}`,
+        );
+      }
+    });
+  }
+
   it("leaves no raw control introducer for any of the OSC/C1 cases", () => {
     for (const input of [
       `${ESC}]0;t${ST}`,
@@ -794,16 +825,26 @@ describe("property: stripInvisible invariants", () => {
 });
 
 // applyLayer1 over a domain that ALSO includes raw ANSI introducers/terminators
-// (ESC, C1 CSI/OSC/ST, BEL, `[`, `]`, `;`, `m`) so the property exercises the
-// OSC/CSI grammar, not just invisible chars.
+// — ESC, the C1 string introducers DCS/SOS/CSI/OSC/PM/APC (U+0090/0098/009B/
+// 009D/009E/009F), C1 ST (U+009C), BEL, the 7-bit string-intro letters
+// (`P X ] ^ _`), and `[ ; m 0` — so the property exercises the whole control
+// grammar, not just invisible chars or the OSC/CSI subset.
 const ansiChar = fc.constantFrom(
   cp(0x1b),
+  cp(0x90),
+  cp(0x98),
   cp(0x9b),
   cp(0x9c),
   cp(0x9d),
+  cp(0x9e),
+  cp(0x9f),
   cp(0x07),
+  "P",
+  "X",
   "[",
   "]",
+  "^",
+  "_",
   ";",
   "m",
   "0",
@@ -823,12 +864,22 @@ describe("property: applyLayer1 invariants", () => {
     );
   });
 
-  it("no raw ANSI control introducer (ESC / C1 CSI) survives, for any input", () => {
+  // The guarantee is no RAW control introducer survives — 7-bit ESC and the
+  // WHOLE 8-bit C1 block, not just the CSI/OSC the grammar names. Asserting the
+  // entire U+0080–U+009F range is what catches a DCS/SOS/PM/APC introducer (or
+  // its body's terminator) the OSC/CSI branches never matched.
+  it("no raw control introducer (ESC or any C1 U+0080–U+009F) survives, for any input", () => {
     fc.assert(
       fc.property(layer1Text, (text) => {
         const { cleaned } = applyLayer1(text);
         assert.ok(!cleaned.includes(cp(0x1b)), "ESC survived");
-        assert.ok(!cleaned.includes(cp(0x9b)), "C1 CSI survived");
+        for (const ch of cleaned) {
+          const code = ch.codePointAt(0);
+          assert.ok(
+            code < 0x80 || code > 0x9f,
+            `C1 control U+${code.toString(16)} survived`,
+          );
+        }
       }),
       fcRunOptions(),
     );
