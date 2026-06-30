@@ -30,6 +30,15 @@ permissions:
 
 jobs:
   test:
+    # The package declares `engines.node >= 20`, so exercise the floor (20) and
+    # current (22): a regression on the supported floor (a newer V8/regex/API
+    # used unguarded) would otherwise only surface in a consumer's environment.
+    # `node-tests-passed` below is the stable Required check, so adding matrix
+    # legs (which rename this job to `test (20)` / `test (22)`) is safe.
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "22"]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -39,6 +48,8 @@ jobs:
 
       - name: Setup base environment
         uses: ./.github/actions/setup-base-env
+        with:
+          node-version: ${{ matrix.node-version }}
 
       - name: Check if test script is configured
         id: check
