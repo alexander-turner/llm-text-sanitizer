@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.4.6] - 2026-06-30
+
+### Changed
+
+- CLI now assembles worker input lines with improved performance (O(n) instead of O(n²)).
+
 ## [1.4.5] - 2026-06-30
 
 ### Added
