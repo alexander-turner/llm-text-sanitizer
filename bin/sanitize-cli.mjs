@@ -364,7 +364,45 @@ function invokedAsScript() {
     return false;
   }
 }
-if (invokedAsScript())
-  await (process.argv.includes("--worker") ? runWorker() : runOneShot());
+export const USAGE = `sanitize-cli — sanitize untrusted text before an LLM sees it.
+
+Reads JSON on stdin, writes one JSON response line on stdout.
+
+Usage:
+  sanitize-cli            one-shot: read ONE request object from stdin, write one response
+  sanitize-cli --worker   worker: read newline-delimited requests until EOF, one response per line
+  sanitize-cli --help     show this help
+
+Request: { "op"?: string, ...fields }. Ops: sanitize (default), sanitizeText,
+classifyPrompt, scanInstructionFiles, cleanFile. A failure response is { "error": string }.
+`;
+
+/**
+ * Resolve argv to a run mode. `-h`/`--help` prints usage; an unrecognized `-…`
+ * flag is a usage error rather than a silent fall-through to one-shot mode,
+ * which would block reading stdin from a TTY with no output. The only real flag
+ * is `--worker`; a bare invocation (or any non-flag arg) is one-shot.
+ * @param {string[]} argv  process.argv (argv[0]=node, argv[1]=script)
+ * @returns {{ mode: "help" | "worker" | "oneshot" | "error", unknown?: string[] }}
+ */
+export function parseArgs(argv) {
+  const flags = argv.slice(2).filter((arg) => arg.startsWith("-"));
+  if (flags.includes("-h") || flags.includes("--help")) return { mode: "help" };
+  const unknown = flags.filter((flag) => flag !== "--worker");
+  if (unknown.length > 0) return { mode: "error", unknown };
+  return { mode: flags.includes("--worker") ? "worker" : "oneshot" };
+}
+
+if (invokedAsScript()) {
+  const parsed = parseArgs(process.argv);
+  if (parsed.mode === "help") process.stdout.write(USAGE);
+  else if (parsed.mode === "error") {
+    process.stderr.write(
+      `sanitize CLI: unrecognized option(s): ${/** @type {string[]} */ (parsed.unknown).join(", ")}\n\n${USAGE}`,
+    );
+    process.exitCode = 2;
+  } else if (parsed.mode === "worker") await runWorker();
+  else await runOneShot();
+}
 
 export { createLineSplitter };

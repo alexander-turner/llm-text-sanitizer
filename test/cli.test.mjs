@@ -22,7 +22,7 @@ import { sanitize } from "../src/index.mjs";
 import { classifyPrompt } from "../src/prompt.mjs";
 import { sanitizeText } from "../src/output.mjs";
 import { scanInstructionFiles } from "../src/instructions.mjs";
-import { createLineSplitter } from "../bin/sanitize-cli.mjs";
+import { createLineSplitter, parseArgs, USAGE } from "../bin/sanitize-cli.mjs";
 import { fcRunOptions } from "./test-helpers.mjs";
 
 const ESC = "\u001b";
@@ -693,5 +693,57 @@ describe("createLineSplitter", () => {
       ),
       fcRunOptions({ numRuns: 200 }),
     );
+  });
+});
+
+// ─── Argument parsing: --help and unknown-flag handling ──────────────────────
+// `parseArgs` is the pure resolver; the bottom-of-file dispatch only acts on its
+// verdict. A bare/`--worker` invocation keeps its existing mode; the new cases
+// are `--help`/`-h` (print usage, don't read stdin) and an unrecognized flag
+// (usage error, exit 2) rather than the old silent fall-through that blocked on
+// a TTY's stdin with no output.
+describe("parseArgs", () => {
+  for (const [argv, expected] of [
+    [["node", "cli"], { mode: "oneshot" }],
+    [["node", "cli", "--worker"], { mode: "worker" }],
+    [["node", "cli", "--help"], { mode: "help" }],
+    [["node", "cli", "-h"], { mode: "help" }],
+    [["node", "cli", "--hepl"], { mode: "error", unknown: ["--hepl"] }],
+    // an unknown flag alongside --worker is still an error (don't silently run)
+    [
+      ["node", "cli", "--worker", "--bogus"],
+      { mode: "error", unknown: ["--bogus"] },
+    ],
+    // a non-flag positional arg is ignored (still one-shot)
+    [["node", "cli", "somefile"], { mode: "oneshot" }],
+    // --help wins even with other flags present
+    [["node", "cli", "--worker", "--help"], { mode: "help" }],
+  ]) {
+    it(`${argv.slice(2).join(" ") || "(no args)"} → ${expected.mode}`, () =>
+      assert.deepEqual(parseArgs(argv), expected));
+  }
+});
+
+describe("CLI flag behavior (spawned)", () => {
+  it("--help prints usage to stdout and exits 0 without reading stdin", () => {
+    // No `input` is supplied: a help invocation must NOT block on stdin.
+    const out = execFileSync("node", [CLI, "--help"], { encoding: "utf8" });
+    assert.equal(out, USAGE);
+  });
+
+  it("an unknown flag exits 2 with an error on stderr, not a silent stdin hang", () => {
+    let status = 0;
+    let stderr = "";
+    try {
+      execFileSync("node", [CLI, "--nope"], {
+        encoding: "utf8",
+        stdio: "pipe",
+      });
+    } catch (err) {
+      status = err.status;
+      stderr = String(err.stderr);
+    }
+    assert.equal(status, 2);
+    assert.match(stderr, /unrecognized option\(s\): --nope/);
   });
 });
