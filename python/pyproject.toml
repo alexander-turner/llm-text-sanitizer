@@ -13,6 +13,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-input-sanitizer"
+# Versions the PYTHON CLIENT surface (this wrapper's API), NOT the npm release
+# line. The two share a name but are published from different ecosystems and bump
+# independently: the npm version is owned by the git-tag release workflow (the
+# committed package.json "version" is intentionally frozen), while this is bumped
+# by hand when the bridge's Python-visible API changes. So `pip install
+# agent-input-sanitizer` and `npm i agent-input-sanitizer` will report different
+# numbers — that is expected, not drift. Keep this a valid PEP 440 release; the
+# guard in tests/test_python_version.py fails the build on a malformed edit.
 version = "1.2.6"
 description = "Python client for agent-input-sanitizer: a thin bridge to the Node.js CLI for byte-identical sanitization verdicts."
 readme = "README.md"
