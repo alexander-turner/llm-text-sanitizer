@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.4.9] - 2026-06-30
+
+### Changed
+
+- Raise the supported Node.js floor to >=22
+
 ## [1.4.6] - 2026-06-30
 
 ### Changed
