@@ -185,18 +185,21 @@ const ZWJ = 0x200d;
 // NOT part of a joined cluster — so an ordinary single joiner per word is kept.
 export const CONSECUTIVE_JOINER_CAP = 8;
 
-// Floor on the document-wide preserve budget. The Joining_Type gate strips
-// joiners that do no rendering work regardless of count, so the bulk covert
-// channel (ZWNJ scattered through Latin/ASCII/mixed text) is closed by shape,
-// not by counting. What remains is the residual channel of MEANINGFUL joiners
-// stuffed into genuine cursive/Indic cover text — each individually legitimate,
+// Floor on the document-wide preserve budget, shared by both preserve kinds
+// (see `kind` in analyzeCarve: joiners AND presentation selectors draw from
+// the same counter). The Joining_Type gate strips joiners that do no
+// rendering work regardless of count, so the bulk covert channel (ZWNJ
+// scattered through Latin/ASCII/mixed text) is closed by shape, not by
+// counting. What remains is the residual channel of MEANINGFUL joiners/
+// selectors stuffed into genuine cover text — each individually legitimate,
 // so indistinguishable one at a time. THIS budget (with CONSECUTIVE_JOINER_CAP
 // and SCATTERED_THRESHOLD) is the explicit, tunable bound on that residual
 // channel; it is not derived, and tightening it trades covert-channel width for
-// clipping genuinely dense prose. The allowance is proportional to visible
-// length (PRESERVED_JOINER_PER_VISIBLE), never below this floor; the floor keeps
-// short but joiner-dense strings (a lone emoji ZWJ sequence, a two-word Persian
-// phrase) un-flagged. Past the allowance the surplus is stripped AND reported.
+// clipping genuinely dense prose or emoji-dense text. The allowance is
+// proportional to visible length (PRESERVED_JOINER_PER_VISIBLE), never below
+// this floor; the floor keeps short but joiner/selector-dense strings (a lone
+// emoji ZWJ sequence, a two-word Persian phrase) un-flagged. Past the
+// allowance the surplus is stripped AND reported.
 export const TOTAL_PRESERVED_JOINER_BUDGET = 16;
 
 // Visible code points required per additional preserved joiner above the floor.
@@ -233,9 +236,10 @@ const EMOJI_BASE = /\p{Extended_Pictographic}/u;
 // following ZWJ (🏳️‍🌈 = flag base, VS16, ZWJ, rainbow; 👁️‍🗨️), so the joiner's real
 // left neighbor for the emoji test is the pictograph, not the selector.
 const VARIATION_SELECTOR = new RegExp(`[${VS}]`, "u");
-// U+FE0F forces emoji (vs text) presentation; a single one directly after a
-// pictograph is part of a visible emoji, not a hidden variation-selector run.
-const EMOJI_PRESENTATION_SELECTOR = 0xfe0f;
+// U+FE0F (VS16) forces emoji presentation, U+FE0E (VS15) forces text
+// presentation (☺︎ vs ☺); either one directly after a pictograph is part of a
+// visible glyph, not a hidden variation-selector run.
+const PRESENTATION_SELECTORS = new Set([0xfe0e, 0xfe0f]);
 
 // Non-global single-char classifiers (CHECKS carry `g`, whose lastIndex is
 // stateful across `.test`). carveStrip uses these to attribute each removed
@@ -327,16 +331,17 @@ function isPreservedJoiner(cps, i) {
 }
 
 /**
- * True when `cps[i]` is an emoji presentation selector (U+FE0F) directly after a
- * pictograph/skin-tone modifier — part of a visible emoji, not a hidden VS run,
- * so it is preserved (a longer selector run still surfaces: the next selector's
- * left neighbour is itself a selector, not a pictograph).
+ * True when `cps[i]` is a presentation selector (VS15 U+FE0E or VS16 U+FE0F)
+ * directly after a pictograph/skin-tone modifier — part of a visible glyph,
+ * not a hidden VS run, so it is preserved (a longer selector run still
+ * surfaces: the next selector's left neighbour is itself a selector, not a
+ * pictograph).
  * @param {string[]} cps @param {number} i
  * @returns {boolean}
  */
 function isEmojiPresentationSelector(cps, i) {
   return (
-    cps[i].codePointAt(0) === EMOJI_PRESENTATION_SELECTOR &&
+    PRESENTATION_SELECTORS.has(/** @type {number} */ (cps[i].codePointAt(0))) &&
     EMOJI_LEFT.test(cps[i - 1] ?? "")
   );
 }
@@ -381,9 +386,10 @@ export function countPayloadInvisible(text) {
 }
 
 /**
- * Bulk strip (the common path: no ZWNJ/ZWJ present, so no carve-out can apply).
- * A single regex pass removes every payload-capable char; `found` names the
- * category codes present via `.search` (which ignores the `g` lastIndex).
+ * Bulk strip (the common path: {@link needsCarveOut} found nothing the
+ * carve-out could apply to). A single regex pass removes every payload-
+ * capable char; `found` names the category codes present via `.search`
+ * (which ignores the `g` lastIndex).
  * @param {string} body
  * @returns {{ cleaned: string, found: string[] }}
  */
@@ -482,14 +488,22 @@ function carveStrip(body) {
 }
 
 /**
- * True when `body` holds at least one ZWNJ/ZWJ (so the carve-out may apply).
+ * True when `body` holds at least one ZWNJ/ZWJ or presentation selector
+ * (VS15 U+FE0E / VS16 U+FE0F) — anything the carve-out in {@link carveStrip}
+ * might preserve. A lone pictograph + selector with no joiner ANYWHERE else in
+ * the document (e.g. "I ❤️ pizza" or "I ❤︎ pizza") still needs the carve-out's
+ * per-neighbor analysis, or bulkStrip strips the selector unconditionally and
+ * corrupts a legitimate glyph.
  * @param {string} body
  * @returns {boolean}
  */
-function hasJoinControl(body) {
+function needsCarveOut(body) {
   return (
     body.includes(String.fromCodePoint(ZWNJ)) ||
-    body.includes(String.fromCodePoint(ZWJ))
+    body.includes(String.fromCodePoint(ZWJ)) ||
+    [...PRESENTATION_SELECTORS].some((cp) =>
+      body.includes(String.fromCodePoint(cp)),
+    )
   );
 }
 
@@ -506,7 +520,7 @@ function hasJoinControl(body) {
 export function stripInvisibleWithReport(text) {
   const hasLeadingBom = text.charCodeAt(0) === 0xfeff;
   const body = hasLeadingBom ? text.slice(1) : text;
-  const { cleaned, found } = hasJoinControl(body)
+  const { cleaned, found } = needsCarveOut(body)
     ? carveStrip(body)
     : bulkStrip(body);
   return { cleaned: hasLeadingBom ? BOM + cleaned : cleaned, found };

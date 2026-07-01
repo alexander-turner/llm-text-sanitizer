@@ -267,6 +267,25 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     });
   }
 
+  for (const [name, selector] of [
+    ["VS16 (emoji presentation)", cp(0xfe0f)],
+    ["VS15 (text presentation)", cp(0xfe0e)],
+  ]) {
+    it(`preserves a standalone pictograph + ${name} with no ZWJ/ZWNJ anywhere in the document`, () => {
+      // Regression: stripInvisibleWithReport used to route on "does the WHOLE
+      // document contain a ZWNJ/ZWJ" and fall back to a bulk strip (no
+      // presentation-selector carve-out at all) when it didn't — so "I ❤️
+      // pizza" / "I ❤︎ pizza", which have a selector but no joiner anywhere,
+      // had that selector stripped. Also regression for a narrower follow-up
+      // bug: the carve-out itself recognized only VS16, so VS15 was still
+      // stripped even once routed through it.
+      const sample = `I ${cp(0x2764)}${selector} pizza`;
+      const { cleaned, found } = stripInvisibleWithReport(sample);
+      assert.equal(cleaned, sample);
+      assert.deepEqual(found, []);
+    });
+  }
+
   it("keeps one emoji selector but strips a stuffed VS16 run", () => {
     // A real emoji keeps ONE selector after the pictograph; a run of them is a
     // hidden channel. Every selector past the first has a selector on its left,
@@ -656,6 +675,23 @@ describe("document-wide preserved-joiner budget", () => {
     const preserved = countOf(cleaned, ZWNJ) + countOf(cleaned, ZWJ);
     assert.equal(preserved, TOTAL_PRESERVED_JOINER_BUDGET);
     assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("standalone presentation selectors (no joiner in the document) share the same budget", () => {
+    // The budget counts every preserved item — joiners AND presentation
+    // selectors — across the whole document, not per-kind. N gap-separated
+    // pictograph+VS16 pairs with NO ZWNJ/ZWJ anywhere still hit the same cap:
+    // over-strip beats under-strip even for a purely selector-dense document.
+    const pictographPlusSelector = cp(0x2764) + cp(0xfe0f) + " ";
+    const input = pictographPlusSelector.repeat(N);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(countOf(input, cp(0xfe0f)), N);
+    assert.equal(
+      countOf(cleaned, cp(0xfe0f)),
+      TOTAL_PRESERVED_JOINER_BUDGET,
+      "preserved selector count must not exceed the shared budget",
+    );
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
   });
 
   it("preserves exactly the budget at the boundary (none stripped, not flagged)", () => {
