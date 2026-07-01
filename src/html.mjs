@@ -270,11 +270,20 @@ export function isHiddenStyle(styleStr) {
   if (val("content-visibility") === "hidden") return true;
 
   // CSS clamps opacity to [0,1], so any NEGATIVE value renders fully
-  // transparent — `parseFloat < EPSILON` (no `Math.abs`) treats `-1`/`-0.5` as
-  // hidden, where the old `Math.abs` mapped `-1` to `1` (visible) and let a
-  // negative-opacity hide slip through.
+  // transparent — `< EPSILON` (no `Math.abs`) treats `-1`/`-0.5` as hidden,
+  // where the old `Math.abs` mapped `-1` to `1` (visible) and let a
+  // negative-opacity hide slip through. `opacity` is a <number> or <percentage>;
+  // a value with any other unit (`0px`) is an INVALID declaration a browser
+  // ignores (element stays visible), so fail open on anything that isn't a bare
+  // number or percentage rather than `parseFloat`-ing the leading `0` out of it.
   const opacity = val("opacity");
-  if (opacity !== "" && parseFloat(opacity) < NEAR_ZERO_EPSILON) return true;
+  const opacityMatch = opacity.match(
+    /^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)(%?)$/,
+  );
+  if (opacityMatch) {
+    const n = parseFloat(opacityMatch[1]) / (opacityMatch[2] ? 100 : 1);
+    if (n < NEAR_ZERO_EPSILON) return true;
+  }
 
   for (const dim of ["height", "width", "font-size"])
     if (isNearZeroLength(val(dim))) return true;

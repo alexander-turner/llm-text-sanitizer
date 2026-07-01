@@ -55,6 +55,11 @@ const HIDDEN_STYLE_CASES = [
   ["opacity:-0.5", true], // (bug: Math.abs mapped -1→1, read as visible)
   ["opacity:-0.001", true],
   ["opacity:0.9", false], // ordinary near-opaque value stays visible
+  ["opacity:0%", true], // valid percentage: 0% is fully transparent
+  ["opacity:0.5%", true], // 0.5% = 0.005 fraction, effectively invisible
+  ["opacity:50%", false], // valid percentage: half-opaque, visible
+  ["opacity:0px", false], // invalid unit — a browser ignores it, element stays visible
+  ["opacity:0em", false], // invalid unit — fail open (was parseFloat'd to 0 → over-flagged)
   // ── zero / near-zero size (epsilon) ──
   ["height:0", true],
   ["width:0", true],
