@@ -284,6 +284,18 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
       assert.equal(cleaned, sample);
       assert.deepEqual(found, []);
     });
+
+    it(`preserves an emoji-modifier base + ${name} (fuzz counterexample 🏻︎)`, () => {
+      // Regression pin for an unseeded fast-check counterexample: the carve-out
+      // preserves a presentation selector after ANY pictograph-class base,
+      // including a standalone skin-tone modifier (U+1F3FB, \\p{Emoji_Modifier}
+      // but also a visible swatch glyph) — the residual-allowlist property must
+      // model that, not just ZWNJ/ZWJ.
+      const sample = `${cp(0x1f3fb)}${selector}`;
+      const { cleaned, found } = stripInvisibleWithReport(sample);
+      assert.equal(cleaned, sample);
+      assert.deepEqual(found, []);
+    });
   }
 
   it("keeps one emoji selector but strips a stuffed VS16 run", () => {
@@ -1018,14 +1030,28 @@ describe("property: stripInvisible invariants", () => {
       fc.property(adversarialText, (text) => {
         const cleaned = stripInvisible(text);
         // After stripping, the only STRIP-class chars left must be ZWNJ/ZWJ
-        // (carve-out) or a single leading BOM.
+        // (carve-out), a presentation selector kept on a pictograph/modifier
+        // base (the carve-out preserves VS15/VS16 directly after one — 🏻︎ is
+        // a visible glyph, not a hidden selector run), or a single leading BOM.
+        const selectorBase = /^[\p{Extended_Pictographic}\p{Emoji_Modifier}]$/u;
         for (let i = 0; i < cleaned.length; i++) {
           const ch = cleaned[i];
           STRIP.lastIndex = 0;
           if (!STRIP.test(ch)) continue;
           const code = cleaned.codePointAt(i);
+          // The base before a selector may be an astral pair: step back two
+          // units when the preceding unit is a low surrogate.
+          const baseStart =
+            i >= 2 && /[\uDC00-\uDFFF]/.test(cleaned[i - 1]) ? i - 2 : i - 1;
+          const keptSelector =
+            (code === 0xfe0e || code === 0xfe0f) &&
+            i > 0 &&
+            selectorBase.test(cleaned.slice(baseStart, i));
           const ok =
-            code === 0x200c || code === 0x200d || (code === 0xfeff && i === 0);
+            code === 0x200c ||
+            code === 0x200d ||
+            keptSelector ||
+            (code === 0xfeff && i === 0);
           assert.ok(ok, `unexpected residual invisible U+${code.toString(16)}`);
         }
       }),
