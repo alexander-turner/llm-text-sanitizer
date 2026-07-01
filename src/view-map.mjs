@@ -82,6 +82,31 @@ function diskOffset(deletions, cleanedOffset, isEnd) {
 }
 
 /**
+ * Re-express each pair's `start` from a Unicode code-point offset — what the
+ * redactor's map mode emits (Python indexes strings by code point) — to a
+ * UTF-16 code-unit offset into `text`, the basis every other function here uses
+ * (JS `indexOf`/`slice`/`.length` count UTF-16 units). The two are identical for
+ * BMP-only text and diverge only when an astral character (e.g. an emoji)
+ * precedes a placeholder, where the code-point offset undercounts by one per
+ * astral char. `pair.start` is compared against UTF-16 view offsets throughout,
+ * so this conversion MUST run once at ingestion or an astral-preceded
+ * placeholder mis-anchors the edit onto the wrong bytes.
+ * @param {string} text the redacted view text the offsets index into
+ * @param {{placeholder: string, original: string, start: number}[]} pairs
+ * @returns {{placeholder: string, original: string, start: number}[]}
+ */
+export function pairsToUtf16(text, pairs) {
+  if (pairs.length === 0) return pairs;
+  const codePoints = Array.from(text);
+  // prefix[i] = UTF-16 length of the first i code points of `text`.
+  const prefix = new Array(codePoints.length + 1);
+  prefix[0] = 0;
+  for (let i = 0; i < codePoints.length; i++)
+    prefix[i + 1] = prefix[i] + codePoints[i].length;
+  return pairs.map((pair) => ({ ...pair, start: prefix[pair.start] }));
+}
+
+/**
  * Map a redacted-view offset to its Layer-1-cleaned offset, or null when the
  * offset falls strictly inside a placeholder (no cleaned position corresponds).
  * @param {{placeholder: string, original: string, start: number}[]} pairs

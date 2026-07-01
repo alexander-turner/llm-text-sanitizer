@@ -26,7 +26,10 @@ jobs:
 
       - name: Check formatting
         if: hashFiles('package.json') != ''
-        run: pnpm format --check
+        # `prettier --check .` (NOT `pnpm format --check`, which expands the
+        # `format` script `prettier --write .` and appends `--check`, so prettier
+        # WRITES the checkout then reports success — a gate that can never fail).
+        run: pnpm format:check
 
       - name: Check tracked symlinks are portable
         run: bash .github/scripts/check-symlinks.sh

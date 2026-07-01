@@ -36,6 +36,7 @@ import {
   alignDeletions,
   resolveSpan,
   rehydrateNewString,
+  pairsToUtf16,
 } from "./view-map.mjs";
 
 // Cheap gate: every redaction placeholder the canonical redactor emits starts
@@ -382,6 +383,10 @@ export async function rehydrateRedacted(
       deny: `cannot resolve redaction placeholders in ${toolInput.file_path}: ${view.unmappable}`,
     };
   }
+  // The redactor emits code-point offsets; the offset machinery below works in
+  // UTF-16. Normalize once here so an astral char before a placeholder can't
+  // mis-anchor the edit (identical to a no-op for BMP-only files).
+  view.pairs = pairsToUtf16(view.text, view.pairs);
   // View identical to disk: any placeholders in the input are literal text.
   if (view.pairs.length === 0 && deletions.length === 0) return null;
 

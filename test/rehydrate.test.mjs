@@ -1096,3 +1096,70 @@ describe("view-map: alignDeletions", () => {
     assert.throws(() => alignDeletions("abc", "xyz"), /not a subsequence/);
   });
 });
+
+// ─── Astral-char offset normalization (code-point → UTF-16) ──────────────────
+
+// Like mkView, but emits CODE-POINT start offsets — exactly what the Python
+// redactor's map mode produces (Python indexes strings by code point). The
+// rehydrate layer must normalize these to UTF-16 before the offset machinery
+// runs, or an astral char before a placeholder mis-anchors the edit.
+function mkViewCodePoints(cleaned, secrets) {
+  const hits = [];
+  for (const { value, placeholder } of secrets)
+    for (const index of occurrences(cleaned, value))
+      hits.push({ index, value, placeholder });
+  hits.sort((a, b) => a.index - b.index);
+  let text = "";
+  let last = 0;
+  const pairs = [];
+  for (const { index, value, placeholder } of hits) {
+    text += cleaned.slice(last, index);
+    pairs.push({
+      placeholder,
+      original: value,
+      start: Array.from(text).length,
+    });
+    text += placeholder;
+    last = index + value.length;
+  }
+  text += cleaned.slice(last);
+  return { text, pairs };
+}
+
+describe("rehydrate: astral chars before a placeholder", () => {
+  // An emoji (astral: 1 code point, 2 UTF-16 units) sits immediately before the
+  // secret, so the redactor's code-point start for the placeholder is one less
+  // than its UTF-16 offset. The old_string begins AT the placeholder, so its
+  // span boundary lands exactly on that offset — the one case where the
+  // code-point/UTF-16 divergence flips a comparison in mapViewOffset and, absent
+  // the conversion, makes resolveSpan reject the edit as cutting a placeholder.
+  const content = `KEY=🔑${SECRET_A}\nDEBUG=1\n`;
+  const view = mkViewCodePoints(content, [
+    { value: SECRET_A, placeholder: PH },
+  ]);
+
+  it("the fixture actually exercises the divergence (code-point start < UTF-16)", () => {
+    // Guard against a vacuous test: if this fixture were BMP-only, the two
+    // offsets would coincide and the conversion would be untested.
+    const cp = view.pairs[0].start;
+    const utf16 = view.text.indexOf(PH);
+    assert.ok(
+      utf16 > cp,
+      "fixture must place an astral char before the placeholder",
+    );
+  });
+
+  it("rehydrates an Edit whose old_string starts at the astral-shifted placeholder", async () => {
+    const out = await rehydrateRedacted(
+      "Edit",
+      {
+        file_path: "/f",
+        old_string: `${PH}\nDEBUG=1`,
+        new_string: `${PH}\nDEBUG=0`,
+      },
+      fakeIo(content, view, reRedact),
+    );
+    assert.equal(out.updatedInput.old_string, `${SECRET_A}\nDEBUG=1`);
+    assert.equal(out.updatedInput.new_string, `${SECRET_A}\nDEBUG=0`);
+  });
+});

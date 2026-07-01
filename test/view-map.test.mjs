@@ -12,6 +12,7 @@ import {
   alignDeletions,
   resolveSpan,
   rehydrateNewString,
+  pairsToUtf16,
 } from "../src/view-map.mjs";
 
 // Secrets assembled at runtime so no complete token literal trips push
@@ -270,5 +271,55 @@ describe("rehydrateNewString", () => {
     const filePairs = [{ placeholder: PH_KEY, original: SECRET_B, start: 0 }];
     const out = rehydrateNewString("old", "new text only", [], filePairs);
     assert.deepEqual(out, { text: "new text only", secrets: [] });
+  });
+});
+
+// ─── pairsToUtf16 (code-point → UTF-16 start normalization) ──────────────────
+
+describe("pairsToUtf16", () => {
+  it("is the identity for BMP-only text (code point == UTF-16 unit)", () => {
+    // No astral chars: every start already equals its UTF-16 offset.
+    const text = `key: ${PH_KEY} tail`;
+    const pairs = [{ placeholder: PH_KEY, original: "AKIA1234", start: 5 }];
+    assert.deepEqual(pairsToUtf16(text, pairs), pairs);
+  });
+
+  it("shifts a start right by one unit per astral char before it", () => {
+    // Two emoji (astral, 2 UTF-16 units each) precede the placeholder, so its
+    // code-point start (3) maps to UTF-16 offset 3 + 2 = 5.
+    const text = `🔑🔑 ${PH_KEY}`;
+    const cpStart = Array.from(text).indexOf("["); // 3 code points in
+    assert.equal(cpStart, 3);
+    const utf16Start = text.indexOf("["); // 5 UTF-16 units in
+    assert.equal(utf16Start, 5);
+    const out = pairsToUtf16(text, [
+      { placeholder: PH_KEY, original: "AKIA1234", start: cpStart },
+    ]);
+    assert.equal(out[0].start, utf16Start);
+    assert.equal(
+      text.slice(out[0].start, out[0].start + PH_KEY.length),
+      PH_KEY,
+    );
+  });
+
+  it("returns the empty pairs array unchanged", () => {
+    const empty = [];
+    assert.equal(pairsToUtf16("🔑 no pairs", empty), empty);
+  });
+
+  it("normalizes several pairs, each by the astral count preceding it", () => {
+    const text = `🔑 ${PH_KEY} 🔑 ${PH}`;
+    const cp = Array.from(text);
+    const s1 = cp.indexOf("["); // first placeholder, code-point offset
+    const s2 = cp.indexOf("[", s1 + 1); // second placeholder, code-point offset
+    const out = pairsToUtf16(text, [
+      { placeholder: PH_KEY, original: "AKIA1", start: s1 },
+      { placeholder: PH, original: "AKIA2", start: s2 },
+    ]);
+    assert.equal(
+      text.slice(out[0].start, out[0].start + PH_KEY.length),
+      PH_KEY,
+    );
+    assert.equal(text.slice(out[1].start, out[1].start + PH.length), PH);
   });
 });

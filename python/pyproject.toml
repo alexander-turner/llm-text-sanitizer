@@ -39,6 +39,23 @@ Homepage = "https://github.com/AlexanderMattTurner/agent-input-sanitizer"
 Repository = "https://github.com/AlexanderMattTurner/agent-input-sanitizer"
 Issues = "https://github.com/AlexanderMattTurner/agent-input-sanitizer/issues"
 
+# The base install is dependency-free. The `secrets` extra pulls in the only
+# third-party dependency in the tree — detect-secrets, the detection oracle for
+# the `agent_input_sanitizer.secrets` subpackage (the folded-in redaction
+# engine). Every detect-secrets import lives inside that subpackage, so a plain
+# `import agent_input_sanitizer` never touches it; install `[secrets]` to use the
+# engine or the console scripts below.
+[project.optional-dependencies]
+secrets = ["detect-secrets>=1.5.0"]
+
+# The redaction engine's entry points. The names are load-bearing: downstream
+# consumers (claude-guard's compose file, JS client, and doctor probe) invoke
+# these exact console-script names. Both fail loud on import when the `secrets`
+# extra is absent (detect-secrets missing) rather than degrading — fail closed.
+[project.scripts]
+agent-secret-redactor = "agent_input_sanitizer.secrets.cli:main"
+agent-secret-redactor-daemon = "agent_input_sanitizer.secrets.daemon:main"
+
 # The bundled CLI is git-ignored (a build artifact), so hatchling's VCS-aware
 # file collection skips it by default. `artifacts` force-includes it into BOTH
 # the sdist and the wheel — the release build regenerates it before packaging.
@@ -47,6 +64,8 @@ artifacts = ["agent_input_sanitizer/_bundled/sanitize-cli.mjs"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent_input_sanitizer"]
+# The invisible-charset SSOT is data, not code, so it is not auto-included.
+artifacts = ["agent_input_sanitizer/data/invisible-charset.json"]
 
 [tool.hatch.build.targets.sdist]
 include = ["agent_input_sanitizer", "README.md"]

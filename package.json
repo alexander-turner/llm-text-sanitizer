@@ -26,7 +26,8 @@
     "prepack": "pnpm build:types",
     "lint": "eslint .",
     "test:mutation": "stryker run",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "lint-staged": {
     "*.{css,scss}": [

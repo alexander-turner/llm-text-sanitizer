@@ -37,6 +37,74 @@ See the package docstring for the full set of entry points (`sanitize_text`,
 `classify_prompt`, `scan_instruction_files`, `clean_file`, and the long-lived
 `Sanitizer` worker).
 
+## Secret redaction (`[secrets]` extra)
+
+The base install is dependency-free. The optional `secrets` extra adds a
+pure-Python secret-redaction engine under `agent_input_sanitizer.secrets` —
+detect-secrets plus custom detectors, benign-value skipping, cross-line
+reassembly, PEM collapse, and exact-match redaction of caller-supplied env-var
+values. Unlike the sanitizer above it needs **no Node.js**; its only dependency
+is `detect-secrets`, pulled in by the extra:
+
+```bash
+pip install "agent-input-sanitizer[secrets]"
+```
+
+Every detect-secrets import lives inside this subpackage, so a plain
+`import agent_input_sanitizer` never touches it. The engine shares the parent
+package's invisible-character SSOT (`agent_input_sanitizer.invisible`) rather
+than forking it — a fork would be a silent security regression.
+
+### In-process
+
+```python
+from agent_input_sanitizer.secrets import RedactorConfig, redact, redact_map
+
+redacted, found = redact("aws_key = AKIAIOSFODNN7EXAMPLE")
+# -> ("aws_key = [REDACTED: AWS Access Key]", ["AWS Access Key"])
+
+# Pass provider/host secret values in — config is supplied, never discovered.
+cfg = RedactorConfig(host_cred_vars={"GH_TOKEN": "ghp_realtokenvalue123"})
+redact("tok=ghp_realtokenvalue123", cfg)  # -> ("tok=[REDACTED: GH_TOKEN]", ["GH_TOKEN"])
+```
+
+### The rehydration map contract
+
+`redact_map(text, config)` returns a lossless, two-way view:
+
+```python
+{"text": "<redacted>",
+ "pairs": [{"placeholder": "[REDACTED: …]", "original": "<secret>", "start": <int>}],
+ "found": ["<type>", ...]}
+```
+
+Substituting each `pair["original"]` at its `start` reconstructs the input
+byte-for-byte. `start` is a **Unicode code-point** offset into `text` (the field
+is `start`, not `start_offset`). U+E000 / U+E001 are reserved placeholder
+sentinels: input already containing either is refused with
+`{"unmappable": "input contains reserved sentinel characters"}` (fail closed)
+rather than producing an ambiguous map.
+
+### Daemon vs. one-shot
+
+detect-secrets caches a process-global `secret_type → plugin` mapping, so a fresh
+one-shot call must re-register the plugin set every time — slow under load. Two
+console scripts (installed with the extra) cover both modes:
+
+- **`agent-secret-redactor`** — one-shot: reads text on stdin, writes the
+  redaction result as JSON on stdout. Re-registers plugins per call.
+- **`agent-secret-redactor-daemon <socket-path>`** — long-lived Unix-socket
+  server that configures the plugin set **once** at startup (a warm-up scan
+  primes the cache before it binds, so a bound socket means ready). Wire protocol
+  both directions: a 4-byte big-endian length prefix then that many bytes of
+  UTF-8 JSON. Request `{"text", "map", "web_ingress", "env_secrets"}`; response is
+  the one-shot result, JSON `null` when nothing is redacted, or `{"error": …}` on
+  a scan failure.
+
+Both console scripts import the engine on startup, so they fail loud if the
+`[secrets]` extra (hence `detect-secrets`) is not installed — fail closed, never
+a silent no-op.
+
 ## Versioning
 
 This package is versioned in lockstep with the npm

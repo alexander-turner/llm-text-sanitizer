@@ -11,7 +11,7 @@
   "coverageAnalysis": "perTest",
   "incremental": true,
   "incrementalFile": "reports/stryker-incremental.json",
-  "ignorePatterns": [".venv", "python"],
+  "ignorePatterns": [".venv"],
   "ignoreStatic": false,
   "reporters": ["html", "clear-text", "progress", "json"],
   "timeoutMS": 60000,
