@@ -1,27 +1,33 @@
 # Installable Python distribution for the agent-input-sanitizer client.
 #
-# This packages ONLY the thin Python bridge (`agent_input_sanitizer`). The
-# sanitization logic is the JavaScript in `src/` and is deliberately NOT bundled
-# into the wheel: a vendored copy is the exact drift this design avoids. An
-# installed package therefore needs Node.js (>=22) on PATH and the path to a
-# JavaScript checkout's CLI, supplied via the `AGENT_SANITIZER_CLI` environment
-# variable (see the package docstring). Run `python -m build` from this `python/`
-# directory to produce the sdist/wheel.
+# The sanitization logic has a single source of truth: the JavaScript in `src/`.
+# The wheel ships a self-contained, single-file BUILD of that CLI (src/ plus its
+# npm deps bundled into one .mjs by `scripts/bundle-python-cli.mjs`) at
+# `agent_input_sanitizer/_bundled/sanitize-cli.mjs`, so `pip install` plus
+# Node.js (>=22) on PATH works with no separate JavaScript checkout. The bundle
+# is a versioned artifact from src/ at one version — not a hand-maintained port,
+# so it cannot drift. It is git-ignored and regenerated per release; the
+# `artifacts` entry below force-includes it into the sdist/wheel. Before building
+# locally, run `node scripts/bundle-python-cli.mjs` from the repo root; then
+# `python -m build` (or `uv build`) from this `python/` directory.
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "agent-input-sanitizer"
-# Versions the PYTHON CLIENT surface (this wrapper's API), NOT the npm release
-# line. The two share a name but are published from different ecosystems and bump
-# independently: the npm version is owned by the git-tag release workflow (the
-# committed package.json "version" is intentionally frozen), while this is bumped
-# by hand when the bridge's Python-visible API changes. So `pip install
-# agent-input-sanitizer` and `npm i agent-input-sanitizer` will report different
-# numbers — that is expected, not drift. Keep this a valid PEP 440 release; the
-# guard in tests/test_python_version.py fails the build on a malformed edit.
-version = "1.2.6"
+# FROZEN PLACEHOLDER — do not hand-edit. Since the wheel bundles a build of
+# `src/`, the Python distribution and the npm package are the SAME logic in two
+# ecosystems, so they share ONE version: the release workflow
+# (`.github/workflows/auto-version.yaml`) derives the version from Conventional
+# Commits, publishes npm AND PyPI at that number from the same commit, and injects
+# it here at build time (working tree only, never committed) — mirroring how
+# package.json's version stays frozen while the npm registry + git tag are the
+# source of truth. So `pip install agent-input-sanitizer` and `npm i
+# agent-input-sanitizer` report the SAME version, and the wheel bundles `src/` at
+# exactly that version. The guard in tests/test_python_version.py pins this to the
+# 0.0.0 sentinel so a stray hand-edit fails CI instead of shipping a wrong number.
+version = "0.0.0"
 description = "Python client for agent-input-sanitizer: a thin bridge to the Node.js CLI for byte-identical sanitization verdicts."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,6 +38,12 @@ keywords = ["sanitizer", "prompt-injection", "unicode", "ansi", "security"]
 Homepage = "https://github.com/alexander-turner/agent-input-sanitizer"
 Repository = "https://github.com/alexander-turner/agent-input-sanitizer"
 Issues = "https://github.com/alexander-turner/agent-input-sanitizer/issues"
+
+# The bundled CLI is git-ignored (a build artifact), so hatchling's VCS-aware
+# file collection skips it by default. `artifacts` force-includes it into BOTH
+# the sdist and the wheel — the release build regenerates it before packaging.
+[tool.hatch.build]
+artifacts = ["agent_input_sanitizer/_bundled/sanitize-cli.mjs"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent_input_sanitizer"]

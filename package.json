@@ -66,6 +66,7 @@
     "@stryker-mutator/tap-runner": "^9.6.1",
     "@types/node": "25.9.1",
     "c8": "11.0.0",
+    "esbuild": "0.28.1",
     "eslint": "10.4.0",
     "fast-check": "4.8.0",
     "globals": "17.6.0",
