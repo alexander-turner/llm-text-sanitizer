@@ -453,6 +453,17 @@ describe("stripInvisible: Joining_Type-driven precision", () => {
     assert.equal(cleaned, cp(0x628) + cp(0x621));
     assert.deepEqual(found, [CATEGORY.CF]);
   });
+
+  // A joiner whose effective neighbour is ANOTHER joiner is a run — a zero-width
+  // payload channel, not a single rendering join — so BOTH are stripped even
+  // between two real cursive letters. Adjacent (not alternating) joiners, so the
+  // run-rejection (`isJoinControl(left) || isJoinControl(right)`) fires on each.
+  it("strips a run of adjacent ZWNJ between two cursive letters", () => {
+    const input = cp(0x628) + ZWNJ + ZWNJ + cp(0x628); // beh · ZWNJ ZWNJ · beh
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x628) + cp(0x628));
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
 });
 
 // ─── isSgrOnly / SGR_RE ──────────────────────────────────────────────────────

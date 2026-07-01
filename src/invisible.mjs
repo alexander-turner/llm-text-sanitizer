@@ -264,7 +264,8 @@ const isCursiveLetter = (jt) => jt === "D" || jt === "R" || jt === "L";
 
 /** The Joining_Type of a single-code-point string, or "U" for "" (boundary).
  * @param {string} ch @returns {string} */
-const jtOf = (ch) => (ch ? joiningType(ch.codePointAt(0) ?? -1) : "U");
+const jtOf = (ch) =>
+  ch ? joiningType(/** @type {number} */ (ch.codePointAt(0))) : "U";
 
 /** True when `ch` is itself a ZWNJ/ZWJ (used to reject joiner runs).
  * @param {string} ch @returns {boolean} */
@@ -302,7 +303,7 @@ function effectiveNeighbor(cps, i, dir) {
  * @returns {boolean}
  */
 function isPreservedJoiner(cps, i) {
-  const cp = cps[i].codePointAt(0) ?? -1;
+  const cp = /** @type {number} */ (cps[i].codePointAt(0));
   if (cp !== ZWNJ && cp !== ZWJ) return false;
   const prev = cps[i - 1] ?? "";
   const next = cps[i + 1] ?? "";
@@ -314,7 +315,8 @@ function isPreservedJoiner(cps, i) {
   )
     return true;
   // Indic: meaningful only immediately after a virama (halant / half-form).
-  if (prev && isVirama(prev.codePointAt(0) ?? -1)) return true;
+  if (prev && isVirama(/** @type {number} */ (prev.codePointAt(0))))
+    return true;
   // Arabic-family cursive joining, on the nearest non-Transparent neighbours.
   const left = effectiveNeighbor(cps, i, -1);
   const right = effectiveNeighbor(cps, i, 1);
