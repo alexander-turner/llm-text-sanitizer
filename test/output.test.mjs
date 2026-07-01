@@ -182,6 +182,61 @@ describe("sanitizeText: Layer 1 invisible/ANSI/surrogate", () => {
   });
 });
 
+// ─── sgrNote honesty: any later layer that mutates bytes clears it ───────────
+
+describe("sanitizeText: sgrNote is honest across Layers 2/4/5", () => {
+  // An SGR-color strip alone sets sgrNote. Each of these inputs adds a SECOND
+  // byte-mutating layer (HTML splice / redact / span delete); once another layer
+  // changes bytes, an SGR strip is no longer the SOLE change, so sgrNote must be
+  // false — otherwise a caller that downgrades the banner on sgrNote would
+  // suppress a redaction/splice/deletion warning.
+  it("clears sgrNote when Layer 2 splices an HTML comment (SGR was not the sole change)", async () => {
+    const r = await sanitizeText(`${ESC}[31mintro${ESC}[0m <!-- secret --> t`, {
+      sgrCarveOut: true,
+      html: true,
+    });
+    assert.equal(r.cleaned, "intro [HTML comment removed] t");
+    assert.equal(r.modified, true);
+    assert.equal(r.sgrNote, false);
+    assert.ok(r.warnings.some((w) => /HTML sanitized/.test(w)));
+  });
+
+  it("clears sgrNote when Layer 4 redacts (redaction warning must not be downgraded)", async () => {
+    const redact = () => ({ text: "REDACTED", found: ["api-key"] });
+    const r = await sanitizeText(`${ESC}[31msecret=AKIA${ESC}[0m`, {
+      sgrCarveOut: true,
+      redact,
+    });
+    assert.equal(r.cleaned, "REDACTED");
+    assert.equal(r.modified, true);
+    assert.equal(r.sgrNote, false);
+    assert.deepEqual(r.warnings, ["API keys/secrets redacted: api-key"]);
+  });
+
+  it("clears sgrNote when Layer 5 deletes a span", async () => {
+    const filterInjection = () => ({ removeSpans: ["BAD"] });
+    const r = await sanitizeText(`${ESC}[31ma BAD b${ESC}[0m`, {
+      sgrCarveOut: true,
+      filterInjection,
+    });
+    assert.equal(r.cleaned, "a  b");
+    assert.equal(r.modified, true);
+    assert.equal(r.sgrNote, false);
+  });
+
+  it("keeps sgrNote true when a redactor RUNS but changes nothing (SGR strip is still the sole change)", async () => {
+    const r = await sanitizeText(`${ESC}[31mfail${ESC}[0m`, {
+      sgrCarveOut: true,
+      redact: () => null,
+      filterInjection: () => ({ warning: "flagged only" }),
+    });
+    assert.equal(r.cleaned, "fail");
+    assert.equal(r.modified, true);
+    assert.equal(r.sgrNote, true); // no later layer mutated bytes
+    assert.deepEqual(r.warnings, ["flagged only"]);
+  });
+});
+
 // ─── Layer 2/3 (applyMarkdownPipeline via sanitizeText) ──────────────────────
 
 describe("sanitizeText: Layer 2/3 markdown pipeline gating", () => {
@@ -529,6 +584,63 @@ describe("sanitizeValue", () => {
     assert.deepEqual(r.value, { a: "x", b: 1 });
     assert.equal(r.modified, false);
   });
+});
+
+// ─── sanitizeValue / suppressToolOutput: exotic objects are opaque leaves ────
+
+// Walking a Map/Set/Date/typed array via Object.entries drops its real contents
+// (its data lives in internal slots, not enumerable own keys), corrupting it to
+// {} and breaking the tool-output shape a harness matches on. They must pass
+// through as opaque leaves — unchanged, same reference.
+function exoticSamples() {
+  return [
+    ["Map", new Map([["k", "v"]])],
+    ["Set", new Set(["a", "b"])],
+    ["Date", new Date("2020-01-02T03:04:05Z")],
+    ["Uint8Array", new Uint8Array([1, 2, 3])],
+    ["RegExp", /pat/g],
+  ];
+}
+
+describe("sanitizeValue passes exotic objects through as opaque leaves", () => {
+  for (const [name, exotic] of exoticSamples()) {
+    it(`preserves a bare ${name} unchanged (same reference, not modified)`, async () => {
+      const warnings = [];
+      const r = await sanitizeValue(exotic, {}, warnings);
+      assert.equal(r.value, exotic); // identity: passed through, not rebuilt
+      assert.equal(r.modified, false);
+      assert.equal(r.sgrNote, false);
+      assert.deepEqual(warnings, []);
+    });
+
+    it(`preserves a ${name} nested in a plain object, sanitizing sibling strings`, async () => {
+      const warnings = [];
+      const r = await sanitizeValue(
+        { data: exotic, note: `mal${ZW}ware`, n: 42 },
+        {},
+        warnings,
+      );
+      assert.equal(r.value.data, exotic); // exotic field intact, not {}
+      assert.equal(r.value.note, "malware"); // sibling string still sanitized
+      assert.equal(r.value.n, 42);
+      assert.equal(r.modified, true);
+    });
+  }
+});
+
+describe("suppressToolOutput passes exotic objects through as opaque leaves", () => {
+  const MSG = "[suppressed]";
+  for (const [name, exotic] of exoticSamples()) {
+    it(`leaves a bare ${name} untouched (only string leaves are replaced)`, () => {
+      assert.equal(suppressToolOutput(exotic, MSG), exotic);
+    });
+
+    it(`leaves a ${name} field intact while replacing sibling string leaves`, () => {
+      const out = suppressToolOutput({ data: exotic, log: "leak" }, MSG);
+      assert.equal(out.data, exotic); // exotic field intact, not {}
+      assert.equal(out.log, MSG);
+    });
+  }
 });
 
 // ─── sanitizeValue: depth / cycle fail-closed (R3) ───────────────────────────

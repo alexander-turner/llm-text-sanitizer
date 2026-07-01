@@ -223,14 +223,23 @@ export async function sanitizeText(text, options = {}) {
     warnings,
     cleaned: l1Cleaned,
     modified: l1Modified,
-    sgrNote,
+    sgrNote: l1SgrNote,
   } = processLayer1(text, sgrCarveOut);
   let cleaned = l1Cleaned;
   let modified = l1Modified;
+  // `sgrNote` stays honest only while a display-only SGR-color strip is the SOLE
+  // change. Any later layer that mutates bytes (markdown splice, redaction, span
+  // deletion) clears it — mirroring processLayer1's lone-surrogate reset — so a
+  // caller that downgrades the banner on `sgrNote` can't suppress a redaction or
+  // HTML-splice warning.
+  let sgrNote = l1SgrNote;
 
   const mdResult = await applyMarkdownPipeline(cleaned, options);
   cleaned = mdResult.cleaned;
-  modified ||= mdResult.modified;
+  if (mdResult.modified) {
+    modified = true;
+    sgrNote = false;
+  }
   warnings.push(...mdResult.warnings);
 
   // Layer 4 — fail closed: a redactor we couldn't run might let a secret
@@ -242,6 +251,7 @@ export async function sanitizeText(text, options = {}) {
       if (secrets) {
         cleaned = secrets.text;
         modified = true;
+        sgrNote = false;
         warnings.push(
           `API keys/secrets redacted: ${secrets.found.join(", ")}${secrets.note ?? ""}`,
         );
@@ -265,6 +275,7 @@ export async function sanitizeText(text, options = {}) {
         if (out.removed > 0) {
           cleaned = out.text;
           modified = true;
+          sgrNote = false;
         }
       }
       if (res.warning) warnings.push(res.warning);
@@ -285,6 +296,25 @@ export async function sanitizeText(text, options = {}) {
  * caller still emits a sanitized, flagged result instead of crashing.
  */
 export const MAX_DEPTH = 200;
+
+/**
+ * True only for arrays and PLAIN objects — the two shapes whose contents are
+ * safe to walk via `Object.entries` without silently dropping data. An exotic
+ * object (Map/Set/Date/RegExp/typed array/class instance) carries its data in
+ * internal slots that `Object.entries` does not enumerate, so descending into
+ * one and rebuilding it from its entries corrupts it to `{}` (or an empty
+ * clone). Those pass through as OPAQUE LEAVES instead — unchanged — preserving
+ * the tool-output shape a harness matches on. A null-prototype object is treated
+ * as plain (its own enumerable string keys are the whole story).
+ * @param {any} value
+ * @returns {boolean}
+ */
+export function isWalkableContainer(value) {
+  if (Array.isArray(value)) return true;
+  if (value === null || typeof value !== "object") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
 
 const DEPTH_PLACEHOLDER = `[withheld: structured output nested beyond ${MAX_DEPTH} levels]`;
 const CYCLE_PLACEHOLDER = "[withheld: circular reference in structured output]";
@@ -332,9 +362,11 @@ async function sanitizeValueAt(value, options, warnings, depth, seen) {
       sgrNote: result.sgrNote,
     };
   }
-  const isContainer =
-    Array.isArray(value) || (value !== null && typeof value === "object");
-  if (!isContainer) return { value, modified: false, sgrNote: false };
+  // Exotic objects (Map/Set/Date/typed array/…) pass through opaque: walking
+  // them via Object.entries would drop their real contents (see
+  // isWalkableContainer), corrupting the tool-output shape a harness matches on.
+  if (!isWalkableContainer(value))
+    return { value, modified: false, sgrNote: false };
 
   // Fail closed before descending into a container: a back-edge to an ancestor
   // (cycle) or a depth past the cap is replaced with a placeholder, never the
@@ -454,9 +486,9 @@ export function suppressToolOutput(value, message) {
  */
 function suppressAt(value, message, depth, seen) {
   if (typeof value === "string") return message;
-  const isContainer =
-    Array.isArray(value) || (value !== null && typeof value === "object");
-  if (!isContainer) return value;
+  // Same opaque-leaf rule as sanitizeValueAt: only arrays and plain objects are
+  // walked; an exotic object would be corrupted to an empty clone.
+  if (!isWalkableContainer(value)) return value;
   if (seen.has(value) || depth >= MAX_DEPTH) return message;
 
   seen.add(value);
