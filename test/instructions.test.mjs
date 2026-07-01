@@ -268,6 +268,20 @@ describe("scanText", () => {
     assert.match(findings[0].method, /scattered/);
     assert.equal(findings[0].charCount, SCATTERED_THRESHOLD);
   });
+
+  it("STILL counts a dangling ZWJ with nothing after it (not an emoji joiner)", () => {
+    // Precision guard for the trailing-index branch: a ZWJ that sits right after
+    // a pictograph but is the very last code point (cps[i + 1] is undefined) is
+    // not joining onto a following emoji base, so it must NOT be discounted.
+    const chunks = Array.from({ length: SCATTERED_THRESHOLD - 1 }, (_, i) =>
+      i % 3 === 0 ? `x${cp(0x200b)}` : cp(0x200b),
+    ).join("");
+    const danglingJoiner = `${cp(0x2764)}${cp(0x200d)}`; // heart + trailing ZWJ, nothing after
+    const findings = scanText(chunks + danglingJoiner);
+    assert.equal(findings.length, 1);
+    assert.match(findings[0].method, /scattered/);
+    assert.equal(findings[0].charCount, SCATTERED_THRESHOLD);
+  });
 });
 
 // ─── file helpers ────────────────────────────────────────────────────────────
