@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.6.4] - 2026-07-01
+
+### Fixed
+
+- Expanded control character blocking to prevent all C1 control introducers in prompts, not just CSI and OSC sequences.
+
 ## [1.6.1] - 2026-07-01
 
 ### Added

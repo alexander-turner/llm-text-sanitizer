@@ -19,24 +19,27 @@ import {
   CHECKS,
   CATEGORY,
   CATEGORY_LABELS,
-  STRIP,
   LONG_RUN_RE,
   LONG_RUN_THRESHOLD,
   SCATTERED_THRESHOLD,
+  countPayloadInvisible,
   isSgrOnly,
   SGR_RE,
 } from "./invisible.mjs";
 import { stripAnsiFully } from "./layer1.mjs";
 
-// The three raw ANSI control introducers a prompt can carry: 7-bit ESC
-// (U+001B), 8-bit C1 CSI (U+009B), and 8-bit C1 OSC (U+009D). Gating on ESC
-// alone is blind to a pure-C1 sequence whose only escape content is, e.g.,
-// `U+009B 2J` (erase) or `U+009D 0;...BEL` (OSC): Layer 1 strips it, dropping
-// the invisible count to zero, so the prompt reads clean. Layer 1's CSI/OSC
-// branches recognize all three, so this gate must too. C1 ST (U+009C) is a
-// terminator, never an introducer, so it is deliberately absent.
-// eslint-disable-next-line no-control-regex -- the raw introducers are exactly what we detect
-const ANSI_INTRODUCER = /[]/;
+// Every raw ANSI control a prompt can carry: 7-bit ESC (U+001B) and the entire
+// 8-bit C1 block (U+0080-U+009F). Gating on ESC alone -- or on only CSI/OSC --
+// is blind to a pure-C1 sequence whose escape content is, e.g., `U+009B 2J`
+// (CSI erase), `U+009D 0;...BEL` (OSC), or the string introducers DCS (U+0090),
+// SOS (U+0098), PM (U+009E), APC (U+009F): Layer 1 strips it, dropping the
+// invisible count to zero, so the prompt reads clean and passes. This gate must
+// match Layer 1's residual sweep (CONTROL_INTRODUCER_RE) exactly -- no raw C1
+// control belongs in a legitimate prompt (the SGR color carve-out is applied
+// separately, after SGR removal), so the whole block is gated, not a hand-picked
+// subset that lets DCS/SOS/PM/APC through.
+// eslint-disable-next-line no-control-regex -- the raw control introducers are exactly what we detect
+const ANSI_INTRODUCER = /[\u001b\u0080-\u009f]/;
 
 /**
  * True when every ANSI introducer in `prompt` belongs to a display-only SGR
@@ -104,7 +107,12 @@ export function classifyPrompt(prompt, strip = stripAnsiFully) {
   const deAnsi = strip(prompt);
 
   const longRunSample = deAnsi.match(LONG_RUN_RE)?.[0] ?? null;
-  const invisibleCount = deAnsi.match(STRIP)?.length ?? 0;
+  // Count only PAYLOAD invisibles for the scatter gate: ZWNJ/ZWJ (and emoji
+  // VS16) that do real rendering work are excluded, so a legitimately
+  // joiner-dense multilingual prompt (formal Persian, an emoji ZWJ sequence) is
+  // not blocked by sheer joiner count. This mirrors carveStrip's own
+  // payloadInvis < SCATTERED_THRESHOLD gate so the block and strip layers agree.
+  const invisibleCount = countPayloadInvisible(deAnsi);
   const invisiblesBelowThreshold =
     longRunSample === null && invisibleCount < SCATTERED_THRESHOLD;
 

@@ -54,7 +54,7 @@ runs:
 
     - name: Set up uv
       if: inputs.setup-python == 'true'
-      uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+      uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       with:
         enable-cache: true
         cache-dependency-glob: "uv.lock"

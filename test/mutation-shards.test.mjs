@@ -85,6 +85,23 @@ describe("mutation shard matrix", () => {
         ranges.at(-1).end >= EOF_SENTINEL,
         `${file}: last range must end open (>= ${EOF_SENTINEL}) so the tail is always mutated`,
       );
+
+      // Tiling [1, EOF) is not enough: the ranges are static line numbers, so if
+      // the file SHRINKS below a boundary, every shard whose `start` now sits
+      // past EOF mutates zero lines and Stryker silently covers nothing while
+      // this test stays green. Pin each shard's `start` to the file's real line
+      // count so every range is guaranteed to cover at least one real line.
+      const lineCount = readFileSync(join(repoRoot, file), "utf8").split(
+        "\n",
+      ).length;
+      for (const range of ranges) {
+        assert.ok(
+          range.start <= lineCount,
+          `${file}: range start ${range.start} is past the file's real line count (${lineCount}); ` +
+            `the file shrank below a shard boundary, so this shard mutates zero lines and covers nothing — ` +
+            `re-tile .github/mutation-shards.json to the current file length`,
+        );
+      }
     }
   });
 });

@@ -27,7 +27,17 @@ fi
 # Every file shipped under src/ must be an .mjs module — a stray .py/.d.ts/.map
 # under src/ means the `files` allowlist widened by accident. Pull the src/ path
 # tokens out of the listing and assert each ends in .mjs.
-src_nonmjs="$(grep -oE 'src/[^[:space:]]+' <<<"$pack_listing" | grep -vE '\.mjs$' || true)"
+# `grep` exits 1 when there is simply nothing to report (no non-.mjs file — the
+# healthy case), which must not abort the job; but exit >=2 is a real grep
+# failure that `|| true` would silently swallow (masking a broken scan as "all
+# clean"). Branch on the code: tolerate <=1, propagate anything higher.
+src_nonmjs=""
+rc=0
+src_nonmjs="$(grep -oE 'src/[^[:space:]]+' <<<"$pack_listing" | grep -vE '\.mjs$')" || rc=$?
+if [ "$rc" -gt 1 ]; then
+  echo "ERROR: pack-listing scan failed (grep exit $rc)" >&2
+  exit "$rc"
+fi
 if [ -n "$src_nonmjs" ]; then
   echo "ERROR: tarball ships a non-.mjs file under src/:" >&2
   echo "$src_nonmjs" >&2

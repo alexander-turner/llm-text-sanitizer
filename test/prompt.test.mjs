@@ -19,6 +19,11 @@ const ESC = cp(0x1b);
 const BEL = cp(0x07);
 const C1_CSI = cp(0x9b); // 8-bit C1 CSI (U+009B): one-byte `ESC[` equivalent
 const C1_OSC = cp(0x9d); // 8-bit C1 OSC (U+009D): one-byte `ESC]` equivalent
+const C1_DCS = cp(0x90); // 8-bit C1 DCS (U+0090): device control string introducer
+const C1_SOS = cp(0x98); // 8-bit C1 SOS (U+0098): start of string
+const C1_PM = cp(0x9e); // 8-bit C1 PM (U+009E): privacy message
+const C1_APC = cp(0x9f); // 8-bit C1 APC (U+009F): application program command
+const C1_ST = cp(0x9c); // 8-bit C1 ST (U+009C): string terminator
 const SH = cp(0x00ad); // soft hyphen (U+00AD), category Cf
 
 // ─── pass ────────────────────────────────────────────────────────────────────
@@ -115,6 +120,14 @@ describe("classifyPrompt: non-SGR ANSI blocks", () => {
     ["C1 erase display (U+009B 2J)", `${C1_CSI}2J`],
     ["C1 cursor-position report (U+009B 6n)", `${C1_CSI}6n`],
     ["C1 OSC title-set (U+009D 0;x BEL)", `${C1_OSC}0;x${BEL}`],
+    // 8-bit C1 STRING introducers the CSI/OSC-only gate also missed: DCS/SOS/
+    // PM/APC open a device/application string Layer 1 strips to nothing, so an
+    // ASCII payload between introducer and terminator used to pass clean.
+    ["C1 DCS string (U+0090 … ST)", `${C1_DCS}qpayload${C1_ST}`],
+    ["C1 SOS string (U+0098 … ST)", `${C1_SOS}payload${C1_ST}`],
+    ["C1 PM string (U+009E … ST)", `${C1_PM}payload${C1_ST}`],
+    ["C1 APC string (U+009F … ST)", `${C1_APC}payload${C1_ST}`],
+    ["lone C1 ST (U+009C)", C1_ST],
   ]) {
     it(`blocks ${name}`, () => {
       const verdict = classifyPrompt(`hello ${seq} world`);

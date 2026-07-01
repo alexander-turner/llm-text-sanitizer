@@ -1,9 +1,11 @@
 # `agent-input-sanitizer`
 
-Sanitize untrusted text **before any model sees it**—in an agent, RAG, or
-tool-use pipeline. It cleans bytes, not prompts, so it’s provider-agnostic:
-every entry point is a pure transform or takes an **injected** input / output / engine seam,
-with nothing about a specific agent harness (Claude, or any other) baked in.
+Most prompt-injection tools run a classifier _over_ the text and hope it
+generalizes. This library targets a narrower, verifiable claim: the
+specific byte-level channels—invisible Unicode, ANSI escapes, human-hidden
+HTML, confusable glyphs, exfil-shaped URLs—that let an attacker smuggle a
+payload the operator can't see but the model still reads. Every layer is a
+deterministic transform you can unit-test with equality assertions.
 
 ```sh
 npm install agent-input-sanitizer
@@ -29,8 +31,10 @@ placeholders where hidden HTML was spliced out.
 ## Entry points
 
 Split into subpaths so the heavy HTML dependency stays opt-in. The **seam**
-column is the agent-specific concern each one injects, so it knows nothing about
-any particular harness.
+column marks entry points that inject the agent-specific concern (a callback
+you supply) rather than baking it in; `—` means the function is a pure
+transform with no such hook, and `fs (direct)` means it does its own file I/O
+(Node's filesystem, not an agent harness) instead of taking a callback.
 
 | #   | Import          | Purpose                                                                                                                                                    | Seam                        |
 | --- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
@@ -38,13 +42,39 @@ any particular harness.
 | 2   | `/html`         | Splice out instructions hidden in comments, `display:none`, off-screen, white-on-white, `hidden`. Leaves a placeholder.                                    | —                           |
 | 3   | `/html`         | Detect exfil-shaped URLs (payloads in query/path, embedded creds, `data:`/`javascript:`, off-origin redirects). Reports only.                              | —                           |
 | 4   | `/confusables`  | Fold look-alike glyphs in tool-call input (paths, commands) to ASCII, closing a cross-script deny-rule bypass.                                             | `scan`                      |
-| 5   | `/instructions` | Scan/auto-clean `CLAUDE.md`, `AGENTS.md`, `SKILL.md`, etc., decoding Unicode-tag + zero-width-binary payloads.                                             | glob set                    |
+| 5   | `/instructions` | Scan/auto-clean `CLAUDE.md`, `AGENTS.md`, `SKILL.md`, etc., decoding Unicode-tag + zero-width-binary payloads.                                             | `fs` (direct)               |
 | 6   | `/prompt`       | Classify a prompt pass / SGR-note / block on payload-capable invisible/ANSI content.                                                                       | —                           |
 | 7   | `/output`       | Run Layers 1–4 over structured tool output, preserving shape. The Layer-5 slot takes a delete-only filter.                                                 | `redact`, `filterInjection` |
 | 8   | `/rehydrate`    | Re-anchor a model Edit composed from the _sanitized_ view back onto real bytes; deny anything ambiguous or secret-exposing.                                | `io`                        |
 | —   | `/view-map`     | Pure offset/text machinery mapping a file's on-disk bytes ↔ the sanitized view (Layer-1 deletions, Layer-4 redactions). No I/O — consumed by `/rehydrate`. | —                           |
 
 See [`THREAT-MODEL.md`](./THREAT-MODEL.md) for per-vector detail.
+
+## How this compares
+
+The "sanitize untrusted LLM input" space mostly splits into two camps: ML
+classifiers that score a prompt's _intent_ (Lakera Guard, Meta's Prompt
+Guard, Rebuff, NeMo Guardrails' input rails), and PII-focused redactors
+(Microsoft Presidio). Neither targets the byte-level hiding channel this
+library covers, and that gap is exactly where invisible-Unicode and
+hidden-HTML payloads live—content a semantic classifier never "sees" as
+suspicious because it renders as blank space or doesn't render at all.
+
+|                               | `agent-input-sanitizer`                                                                                                  | Semantic guard/classifier (Lakera, Prompt Guard, Rebuff, NeMo rails)                                       | PII redactor (Presidio)                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| **What it catches**           | Payload-capable invisible chars, ANSI/SGR, hidden HTML, confusable glyphs, exfil-shaped URLs                             | Malicious _intent_—jailbreaks, injected instructions, off-topic asks                                       | Names, emails, SSNs, and other PII spans                     |
+| **How it decides**            | Deterministic parsing/regex over real tokenizer output—no model call                                                     | ML/LLM classification—probabilistic, needs a threshold and retuning as attacks shift                       | NER + pattern matching                                       |
+| **Failure mode**              | Fails open on ambiguous input (see [`THREAT-MODEL.md`](./THREAT-MODEL.md)); false negative over false positive by design | False positives silently mangle or block legitimate prompts; false negatives are invisible until exploited | Under/over-redaction depending on locale and entity coverage |
+| **Latency / infra**           | Pure JS, mostly zero-dep (`/html` lazy-loads ~200 ms once)                                                               | Network round-trip to a hosted model, or a local model to host yourself                                    | Local, but heavier NLP pipeline                              |
+| **Determinism / testability** | Exact-equality unit tests, no flakiness across runs                                                                      | Same input can classify differently across model versions                                                  | Deterministic per rule, but rule coverage varies             |
+| **Reversibility**             | `/rehydrate` re-anchors a model's edit from the sanitized view back onto real bytes, denying anything ambiguous          | N/A—classifiers only pass/block, they don't rewrite-and-reverse                                            | N/A                                                          |
+| **Non-JS support**            | Same verdicts via a bundled CLI/worker—Python client included, no reimplementation                                       | Usually a hosted API (language-agnostic) or Python-only SDK                                                | Python-first (spaCy-based)                                   |
+
+In practice these are complementary, not competing: run a semantic guard for
+intent, Presidio for PII you must not leak, and this library for the hidden
+channel both of those are blind to. If you already run a classifier and are
+still getting bitten by zero-width payloads or `display:none` instructions
+riding along in RAG context, that's the gap this library closes.
 
 ### Examples
 
@@ -132,10 +162,11 @@ sanitize-cli --worker                              # newline-delimited, one resp
 
 The [`python/`](./python) client wraps every bridged op (`sanitize`,
 `sanitize_text`, `classify_prompt`, `scan_instruction_files`, `clean_file`). It
-resolves the bundled CLI relative to
-its own source tree—so it runs from a repo checkout, not yet a `pip install`. The
-first `html=True` call starts a shared worker, so the ~200 ms HTML module-load
-is paid **once per process**; Layer-1 calls stay one-shot. `persist=True/False`
+auto-resolves the CLI when imported from a JS repo checkout; a `pip install`ed
+wheel doesn't bundle the JS (a vendored copy would drift), so set
+`AGENT_SANITIZER_CLI` to that checkout's `bin/sanitize-cli.mjs`. The first
+`html=True` call starts a shared worker, so the ~200 ms HTML module-load is
+paid **once per process**; Layer-1 calls stay one-shot. `persist=True/False`
 forces the mode and `shutdown_worker()` (also an `atexit` hook) stops it.
 
 ```python
