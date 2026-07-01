@@ -267,6 +267,17 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     });
   }
 
+  it("preserves a standalone pictograph + VS16 with no ZWJ/ZWNJ anywhere in the document", () => {
+    // Regression: stripInvisibleWithReport used to route on "does the WHOLE
+    // document contain a ZWNJ/ZWJ" and fall back to a bulk strip (no emoji
+    // carve-out at all) when it didn't — so "I ❤️ pizza", which has a
+    // presentation selector but no joiner anywhere, had its selector stripped.
+    const sample = `I ${cp(0x2764)}${cp(0xfe0f)} pizza`;
+    const { cleaned, found } = stripInvisibleWithReport(sample);
+    assert.equal(cleaned, sample);
+    assert.deepEqual(found, []);
+  });
+
   it("keeps one emoji selector but strips a stuffed VS16 run", () => {
     // A real emoji keeps ONE selector after the pictograph; a run of them is a
     // hidden channel. Every selector past the first has a selector on its left,

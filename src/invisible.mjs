@@ -482,14 +482,19 @@ function carveStrip(body) {
 }
 
 /**
- * True when `body` holds at least one ZWNJ/ZWJ (so the carve-out may apply).
+ * True when `body` holds at least one ZWNJ/ZWJ or emoji presentation selector
+ * (U+FE0F) — anything the carve-out in {@link carveStrip} might preserve. A
+ * lone pictograph + U+FE0F with no joiner ANYWHERE else in the document (e.g.
+ * "I ❤️ pizza") still needs the carve-out's per-neighbor analysis, or bulkStrip
+ * strips the selector unconditionally and corrupts a legitimate emoji.
  * @param {string} body
  * @returns {boolean}
  */
-function hasJoinControl(body) {
+function needsCarveOut(body) {
   return (
     body.includes(String.fromCodePoint(ZWNJ)) ||
-    body.includes(String.fromCodePoint(ZWJ))
+    body.includes(String.fromCodePoint(ZWJ)) ||
+    body.includes(String.fromCodePoint(EMOJI_PRESENTATION_SELECTOR))
   );
 }
 
@@ -506,7 +511,7 @@ function hasJoinControl(body) {
 export function stripInvisibleWithReport(text) {
   const hasLeadingBom = text.charCodeAt(0) === 0xfeff;
   const body = hasLeadingBom ? text.slice(1) : text;
-  const { cleaned, found } = hasJoinControl(body)
+  const { cleaned, found } = needsCarveOut(body)
     ? carveStrip(body)
     : bulkStrip(body);
   return { cleaned: hasLeadingBom ? BOM + cleaned : cleaned, found };
