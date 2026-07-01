@@ -35,10 +35,11 @@ describe("occurrences", () => {
     assert.deepEqual(occurrences("abc", "z"), []);
   });
 
-  it("a length-1 needle steps by exactly its length (the max(len, 1) boundary)", () => {
-    // The Math.max(needle.length, 1) step is what guarantees forward progress;
-    // for a length-1 needle the max picks the length (1), so overlapping single
-    // chars are reported once each without revisiting an index.
+  it("a length-1 needle steps by exactly its length", () => {
+    // Forward progress comes from the `if (needle === "") return []` guard (which
+    // rules out the only zero-length step) plus the `i + needle.length` advance;
+    // for a length-1 needle each step is 1, so overlapping single chars are
+    // reported once each without revisiting an index.
     assert.deepEqual(occurrences("aaa", "a"), [0, 1, 2]);
     assert.deepEqual(occurrences("aXa", "a"), [0, 2]);
   });
