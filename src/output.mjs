@@ -365,8 +365,28 @@ async function sanitizeValueAt(value, options, warnings, depth, seen) {
   // Exotic objects (Map/Set/Date/typed array/…) pass through opaque: walking
   // them via Object.entries would drop their real contents (see
   // isWalkableContainer), corrupting the tool-output shape a harness matches on.
-  if (!isWalkableContainer(value))
+  if (!isWalkableContainer(value)) {
+    // Fail-closed signal: an object with a non-plain prototype AND own
+    // enumerable keys (a class instance / Object.create data holder) hides
+    // string leaves that Object.entries WOULD reach — but walking + rebuilding
+    // would flatten its prototype and corrupt the shape a harness matches on. We
+    // refuse to mangle it (precision), yet must not silently vouch for it on the
+    // redactor path, so we pass it through UNCHANGED and FLAG it. Standard value
+    // objects keep their data in internal slots with no own enumerable keys
+    // (Map/Set/Date/RegExp) or in a typed-array buffer of numbers (ArrayBuffer
+    // views) — no reachable text to sanitize — so they stay silent, avoiding the
+    // alert fatigue of flagging every benign Date.
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      !ArrayBuffer.isView(value) &&
+      Object.keys(value).length > 0
+    )
+      warnings.push(
+        "An object with a non-plain prototype (e.g. a class instance) in structured tool output was passed through unsanitized — its properties could not be walked without corrupting the object's shape",
+      );
     return { value, modified: false, sgrNote: false };
+  }
 
   // Fail closed before descending into a container: a back-edge to an ancestor
   // (cycle) or a depth past the cap is replaced with a placeholder, never the

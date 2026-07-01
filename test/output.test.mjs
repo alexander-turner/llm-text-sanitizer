@@ -628,6 +628,50 @@ describe("sanitizeValue passes exotic objects through as opaque leaves", () => {
   }
 });
 
+// A class instance carries string data in OWN enumerable properties that
+// Object.entries would reach — but its prototype is not Object.prototype, so
+// isWalkableContainer refuses to walk it (rebuilding would flatten the
+// prototype and corrupt the shape). It must pass through unchanged (precision)
+// AND be FLAGGED (fail-closed on the redactor path), never silently vouched for.
+describe("sanitizeValue flags un-walkable objects that hide reachable data", () => {
+  class Note {
+    constructor(text) {
+      this.text = text;
+    }
+  }
+
+  it("flags a bare class instance carrying a hidden payload, passing it through unchanged", async () => {
+    const warnings = [];
+    const inst = new Note(`mal${ZW}ware`);
+    const r = await sanitizeValue(inst, {}, warnings);
+    assert.equal(r.value, inst); // identity: not rebuilt, not mangled
+    assert.equal(r.value.text, `mal${ZW}ware`); // payload intact, NOT sanitized
+    assert.equal(r.modified, false); // bytes unchanged — honest
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /non-plain prototype/);
+  });
+
+  it("flags a class instance nested beside sanitized siblings", async () => {
+    const warnings = [];
+    const r = await sanitizeValue(
+      { inst: new Note("payload"), note: `mal${ZW}ware` },
+      {},
+      warnings,
+    );
+    assert.equal(r.value.note, "malware"); // sibling string sanitized
+    assert.ok(warnings.some((w) => /non-plain prototype/.test(w)));
+  });
+
+  it("stays silent on an Object.create(null) plain holder (it IS walkable)", async () => {
+    const warnings = [];
+    const holder = Object.create(null);
+    holder.note = `mal${ZW}ware`;
+    const r = await sanitizeValue(holder, {}, warnings);
+    assert.equal(r.value.note, "malware"); // null-proto is treated as plain
+    assert.ok(!warnings.some((w) => /non-plain prototype/.test(w)));
+  });
+});
+
 describe("suppressToolOutput passes exotic objects through as opaque leaves", () => {
   const MSG = "[suppressed]";
   for (const [name, exotic] of exoticSamples()) {
