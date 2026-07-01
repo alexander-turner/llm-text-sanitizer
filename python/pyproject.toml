@@ -16,15 +16,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-input-sanitizer"
-# Versions the PYTHON CLIENT surface (this wrapper's API), NOT the npm release
-# line. The two share a name but are published from different ecosystems and bump
-# independently: the npm version is owned by the git-tag release workflow (the
-# committed package.json "version" is intentionally frozen), while this is bumped
-# by hand when the bridge's Python-visible API changes. So `pip install
-# agent-input-sanitizer` and `npm i agent-input-sanitizer` will report different
-# numbers — that is expected, not drift. Keep this a valid PEP 440 release; the
-# guard in tests/test_python_version.py fails the build on a malformed edit.
-version = "1.3.0"
+# FROZEN PLACEHOLDER — do not hand-edit. Since the wheel bundles a build of
+# `src/`, the Python distribution and the npm package are the SAME logic in two
+# ecosystems, so they share ONE version: the release workflow
+# (`.github/workflows/auto-version.yaml`) derives the version from Conventional
+# Commits, publishes npm AND PyPI at that number from the same commit, and injects
+# it here at build time (working tree only, never committed) — mirroring how
+# package.json's version stays frozen while the npm registry + git tag are the
+# source of truth. So `pip install agent-input-sanitizer` and `npm i
+# agent-input-sanitizer` report the SAME version, and the wheel bundles `src/` at
+# exactly that version. The guard in tests/test_python_version.py pins this to the
+# 0.0.0 sentinel so a stray hand-edit fails CI instead of shipping a wrong number.
+version = "0.0.0"
 description = "Python client for agent-input-sanitizer: a thin bridge to the Node.js CLI for byte-identical sanitization verdicts."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -1,24 +1,19 @@
-name: Publish Python to PyPI
+name: Publish Python to PyPI (break-glass)
 
-# Publishes the Python client (python/) to PyPI via OIDC Trusted Publishing —
-# no API token is stored anywhere. The Python distribution is versioned and
-# released BY HAND, independently of the npm `vX.Y.Z` line (see the comment on
-# python/pyproject.toml's version field), so this fires ONLY on a dedicated
-# `python-vX.Y.Z` tag — never on the npm release tags. To cut a release: bump
-# python/pyproject.toml's version, commit, then push a matching tag, e.g.
-#   git tag python-v1.2.6 && git push origin python-v1.2.6
+# Manual fallback for the coupled release. The PRIMARY path publishes PyPI from
+# auto-version.yaml alongside the npm release (same version, from the same
+# commit) — see that workflow. This one exists only for recovery: if npm
+# published and tagged but the PyPI step failed, re-running auto-version is a
+# no-op (HEAD is already tagged), so this dispatch-only job rebuilds the wheel at
+# the LATEST vX.Y.Z tag and publishes it. It never runs automatically.
 #
-# One-time PyPI setup (Trusted Publishing has no secret to rotate): on
-# pypi.org, add a "pending publisher" for project `agent-input-sanitizer`
-# pointing at this repo, workflow file `publish-python.yaml`, environment
-# `pypi`. https://docs.pypi.org/trusted-publishers/
+# One-time PyPI setup (Trusted Publishing has no secret to rotate): on pypi.org,
+# add a "pending publisher" for project `agent-input-sanitizer` pointing at this
+# repo and workflow file `publish-python.yaml` (no environment). The primary
+# auto-version.yaml needs its own publisher entry.
+# https://docs.pypi.org/trusted-publishers/
 
 on:
-  push:
-    tags:
-      - "python-v*"
-  # Manual runs (e.g. re-publish after a failed upload) still go through Trusted
-  # Publishing; there is no tag to check, so the version guard is tag-only below.
   workflow_dispatch:
 
 concurrency:
@@ -36,12 +31,9 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-
-      # A mistyped tag would publish the wrong, immutable version — fail here.
-      # Skipped on workflow_dispatch (no tag ref to check).
-      - name: Check tag matches package version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: bash .github/scripts/check-python-tag-version.sh "$GITHUB_REF"
+          # Full history so the latest vX.Y.Z tag (the release version to
+          # rebuild) is reachable by git describe.
+          fetch-depth: 0
 
       # Node + pnpm are needed to bundle the self-contained CLI into the wheel.
       # No dependency caching anywhere in this job: a poisoned cache could tamper
@@ -59,10 +51,19 @@ jobs:
       - name: Install Node dependencies
         run: pnpm install
 
-      # Regenerate the bundled CLI from src/ at the tagged version; uv build then
-      # force-includes it into the sdist/wheel (see python/pyproject.toml).
+      # Regenerate the bundled CLI from src/; uv build force-includes it into the
+      # sdist/wheel (see python/pyproject.toml).
       - name: Bundle the CLI into the Python package
         run: node scripts/bundle-python-cli.mjs
+
+      # Rebuild at the latest release tag so this republishes the SAME version the
+      # coupled release computed (the committed pyproject version is a 0.0.0
+      # placeholder). Fails loudly if no vX.Y.Z tag exists yet.
+      - name: Set the wheel version to the latest release tag
+        run: |
+          set -euo pipefail
+          tag="$(git describe --tags --match 'v*' --abbrev=0)"
+          bash scripts/set-pyproject-version.sh "${tag#v}"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -91,11 +92,6 @@ jobs:
     # authenticates to PyPI must not be mintable by the build job.
     permissions:
       id-token: write
-    # Gating on a named environment lets PyPI's Trusted Publisher config pin the
-    # environment and lets the repo add release protections (required reviewers).
-    environment:
-      name: pypi
-      url: https://pypi.org/p/agent-input-sanitizer
     steps:
       - name: Download distributions
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0

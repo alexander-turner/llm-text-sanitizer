@@ -36,3 +36,12 @@ print(result.cleaned, result.found, result.warnings)
 See the package docstring for the full set of entry points (`sanitize_text`,
 `classify_prompt`, `scan_instruction_files`, `clean_file`, and the long-lived
 `Sanitizer` worker).
+
+## Versioning
+
+This package is versioned in lockstep with the npm
+[`agent-input-sanitizer`](https://www.npmjs.com/package/agent-input-sanitizer):
+each release publishes both at the same version from the same commit, and the
+wheel bundles `src/` at exactly that version. So `pip install
+agent-input-sanitizer==X.Y.Z` and `npm i agent-input-sanitizer@X.Y.Z` are the
+same underlying logic.
