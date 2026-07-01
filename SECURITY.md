@@ -11,7 +11,7 @@ report tips off attackers before downstream users can update.
 
 Instead, report privately through one of:
 
-- GitHub's [private vulnerability reporting](https://github.com/alexander-turner/agent-input-sanitizer/security/advisories/new)
+- GitHub's [private vulnerability reporting](https://github.com/AlexanderMattTurner/agent-input-sanitizer/security/advisories/new)
   ("Report a vulnerability" under the **Security** tab), or
 - email the maintainer at `security@turntrout.com`.
 

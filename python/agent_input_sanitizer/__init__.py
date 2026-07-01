@@ -29,18 +29,25 @@ The CLI caps a single request at ``AGENT_SANITIZER_MAX_INPUT_BYTES`` UTF-8 bytes
 an unbounded payload. Set that environment variable in the calling process to
 raise or lower the limit.
 
-Locating the CLI: the sanitizer's logic lives only in the JavaScript ``src/``,
-and the wheel deliberately does **not** bundle it (a vendored copy would be the
-exact drift this design avoids). So an installed package must be told where the
-JS checkout's CLI lives. Resolution order:
+Locating the CLI: the sanitizer's logic has a single source of truth, the
+JavaScript in ``src/``. The wheel ships a self-contained, single-file **build**
+of that CLI (``src/`` plus its npm dependencies bundled into one ``.mjs`` by
+``scripts/bundle-python-cli.mjs`` at release time), so ``pip install
+agent-input-sanitizer`` plus Node.js (>=22) on ``PATH`` works with no separate
+JavaScript checkout. That bundle is a versioned build artifact from ``src/`` at
+one version, not a hand-maintained port, so it cannot drift. Resolution order:
 
 #. ``AGENT_SANITIZER_CLI`` — an explicit path to ``sanitize-cli.mjs`` (or any
-   compatible CLI). This is how a pip-installed package reaches the JS; point it
-   at the ``bin/sanitize-cli.mjs`` of a cloned/``npm install``-ed checkout.
+   compatible CLI). An escape hatch to pin the client at a specific JS checkout's
+   ``bin/sanitize-cli.mjs``; it overrides the bundled CLI.
+#. The bundled CLI shipped inside the installed package
+   (``agent_input_sanitizer/_bundled/sanitize-cli.mjs``). Present in a
+   pip-installed wheel; absent in a repo checkout, where it is a git-ignored
+   build artifact and the source sibling below is used instead.
 #. The source-tree sibling — when this module is imported from a repo checkout,
    the CLI is at ``<repo>/bin/sanitize-cli.mjs`` (two parents up).
 
-If neither resolves, every entry point fails loudly with a message naming both
+If none resolves, every entry point fails loudly with a message naming the
 options, rather than an opaque ``node: Cannot find module``.
 """
 
@@ -54,14 +61,21 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Env var an installed package uses to point at a JS checkout's CLI (the wheel
-# does not bundle the JS — see the module docstring).
+# Env var to override the CLI path (e.g. pin at a specific JS checkout); takes
+# priority over the bundled CLI. See the module docstring.
 _CLI_ENV = "AGENT_SANITIZER_CLI"
+
+# The self-contained CLI bundled into the wheel, next to this module at
+# _bundled/sanitize-cli.mjs. Present in a pip-installed package; absent in a repo
+# checkout (there it is a git-ignored build artifact — the source sibling below
+# is used). Kept as a module attribute so the resolver (and tests) can override
+# it.
+_BUNDLED_CLI = Path(__file__).resolve().parent / "_bundled" / "sanitize-cli.mjs"
 
 # The source-tree fallback: this module is at
 # <repo>/python/agent_input_sanitizer/__init__.py, so <repo>/bin/sanitize-cli.mjs
 # is two parents up. This resolves only when imported from a checkout; an
-# installed package relies on _CLI_ENV. Kept as a module attribute so the
+# installed package uses the bundled CLI. Kept as a module attribute so the
 # resolver (and tests) can read or override it.
 _CLI = Path(__file__).resolve().parents[2] / "bin" / "sanitize-cli.mjs"
 
@@ -130,13 +144,18 @@ def _node_missing(node: str) -> RuntimeError:
 
 
 def _resolve_cli() -> Path:
-    """Resolve the path to the sanitize CLI: ``AGENT_SANITIZER_CLI`` if set, else
-    the source-tree sibling (``_CLI``). See the module docstring for the rationale
-    (the wheel doesn't bundle the JS, so an installed package needs the env var).
+    """Resolve the path to the sanitize CLI. Order: ``AGENT_SANITIZER_CLI`` if
+    set, else the bundled CLI shipped in the wheel, else the source-tree sibling
+    (``_CLI``). See the module docstring for the rationale.
+
+    An explicit env override is returned as-is even if it doesn't exist, so
+    ``_require_cli`` can fail with a message that names the bad path.
     """
     override = os.environ.get(_CLI_ENV)
     if override:
         return Path(override)
+    if _BUNDLED_CLI.is_file():
+        return _BUNDLED_CLI
     return _CLI
 
 
@@ -144,16 +163,18 @@ def _require_cli() -> Path:
     """Resolve the CLI path and fail with a clear message if it isn't a file.
 
     Without this check a missing CLI surfaces as an opaque "node: Cannot find
-    module". The message names both ways to locate the CLI so a pip-installed
-    user (no source sibling) knows to set ``AGENT_SANITIZER_CLI``.
+    module". The message names the ways to locate the CLI so a user knows how to
+    recover (normally the bundled CLI is present in a pip-installed wheel; a
+    repo checkout uses the source sibling).
     """
     cli = _resolve_cli()
     if not cli.is_file():
         raise RuntimeError(
-            f"sanitize CLI not found at {cli}. Set the {_CLI_ENV} environment "
-            "variable to the path of a JavaScript checkout's bin/sanitize-cli.mjs, "
-            "or run the client from a repo checkout (the CLI is resolved relative "
-            "to its source tree). The wheel does not bundle the JS CLI."
+            f"sanitize CLI not found at {cli}. A pip-installed wheel ships a "
+            "bundled CLI; if it is missing, reinstall the package. Otherwise set "
+            f"the {_CLI_ENV} environment variable to a JavaScript checkout's "
+            "bin/sanitize-cli.mjs, or run the client from a repo checkout (the "
+            "CLI is resolved relative to its source tree)."
         )
     return cli
 

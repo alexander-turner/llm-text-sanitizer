@@ -25,8 +25,8 @@ import { randomBytes } from "node:crypto";
 import { join, relative, resolve, isAbsolute, dirname, sep } from "node:path";
 import {
   LONG_RUN_RE,
-  STRIP,
   SCATTERED_THRESHOLD,
+  countPayloadInvisible,
   stripInvisible,
 } from "./invisible.mjs";
 
@@ -54,11 +54,17 @@ export function decodeRun(run) {
     [0x200d, "|"],
   ]);
 
-  if (tagAscii.length > 0) {
+  const zwCount = cps.filter((cp) => ZW_BIT.has(cp)).length;
+
+  // Only take the tag-characters branch when tag chars are the MAJORITY of the
+  // run. A run that is overwhelmingly zero-width bits plus ONE stray tag char is
+  // a zero-width-binary payload, not a tag payload — labeling it "Unicode tag
+  // characters → ASCII" buries the real (binary) payload behind the wrong
+  // method. Reporting accuracy only: the strip removes the whole run regardless.
+  if (tagAscii.length > 0 && tagAscii.length > cps.length / 2) {
     // A run can carry BOTH tag-ASCII and zero-width chars; the strip removes the
     // whole run regardless, but the operator-facing `decoded` must reflect the
     // zero-width portion too rather than silently dropping it.
-    const zwCount = cps.filter((cp) => ZW_BIT.has(cp)).length;
     const note = zwCount > 0 ? ` + ${zwCount} zero-width char(s)` : "";
     return {
       method: "Unicode tag characters → ASCII",
@@ -66,11 +72,20 @@ export function decodeRun(run) {
     };
   }
 
-  if (cps.every((cp) => ZW_BIT.has(cp))) {
-    const bits = cps.map((cp) => ZW_BIT.get(cp)).join("");
+  // Zero-width-binary branch: the whole run is ZW bits, OR ZW bits are the
+  // majority (so a run of many bits plus a stray tag/other char is decoded as
+  // the binary payload it actually is, not mislabeled). Decode only the ZW code
+  // points; a `+ N other char(s)` note keeps any non-ZW portion visible.
+  if (zwCount > 0 && zwCount > cps.length / 2) {
+    const bits = cps
+      .filter((cp) => ZW_BIT.has(cp))
+      .map((cp) => ZW_BIT.get(cp))
+      .join("");
+    const otherCount = cps.length - zwCount;
+    const note = otherCount > 0 ? ` + ${otherCount} other char(s)` : "";
     return {
       method: "zero-width binary encoding",
-      decoded: `[${cps.length} zero-width chars: ${bits.slice(0, 80)}]`,
+      decoded: `[${zwCount} zero-width chars: ${bits.slice(0, 80)}]${note}`,
     };
   }
 
@@ -104,9 +119,26 @@ export function scanText(content) {
 
   // Threshold-evasion: scattered invisible chars not in a long run can still be
   // a payload. Always evaluated; chars already in a run are excluded so they
-  // aren't double-counted.
-  const allInvisible = content.match(STRIP);
-  const scattered = (allInvisible ? allInvisible.length : 0) - runChars;
+  // aren't double-counted. countPayloadInvisible is invisible.mjs's carve-out
+  // counter (the SSOT the stripper itself gates on): it discounts every
+  // invisible that does real rendering work — emoji presentation selectors
+  // (VS16 *and* VS15) on a real pictograph, emoji-sequence ZWJ, and linguistic
+  // ZWNJ/ZWJ between cursive letters or after a virama. A hand-rolled emoji-only
+  // mirror lived here before and over-counted linguistic joiners and VS15, so a
+  // ZWNJ-dense Persian doc or a doc of text-presentation hearts (❤︎) tripped a
+  // scattered false positive on content stripInvisible would preserve.
+  //
+  // Asymmetry (deliberate, benign): the minuend discounts preserved
+  // selectors/joiners EVERYWHERE, while `runChars` is each run's RAW length. A
+  // long run is ≥LONG_RUN_THRESHOLD *consecutive* invisibles, and a preserved
+  // selector/joiner is always flanked by a visible neighbor — so it cannot sit
+  // inside such a run, and the two counts describe disjoint chars in practice.
+  // In the pathological case that they don't (e.g. a run of stacked VS16), the
+  // raw `runChars` subtracts at most a few more than the minuend added, biasing
+  // `scattered` slightly LOW — a false negative, the precision-favoring
+  // direction, never a spurious finding. `scattered` may even go negative; the
+  // `>=` gate treats that as "no scatter", which is correct.
+  const scattered = countPayloadInvisible(content) - runChars;
   if (scattered >= SCATTERED_THRESHOLD) {
     findings.push({
       line: 0,

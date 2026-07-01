@@ -5,12 +5,12 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alexander-turner/agent-input-sanitizer.git"
+    "url": "git+https://github.com/AlexanderMattTurner/agent-input-sanitizer.git"
   },
   "bugs": {
-    "url": "https://github.com/alexander-turner/agent-input-sanitizer/issues"
+    "url": "https://github.com/AlexanderMattTurner/agent-input-sanitizer/issues"
   },
-  "homepage": "https://github.com/alexander-turner/agent-input-sanitizer#readme",
+  "homepage": "https://github.com/AlexanderMattTurner/agent-input-sanitizer#readme",
   "author": "Alexander Turner",
   "packageManager": "pnpm@11.8.0",
   "bin": {
@@ -66,6 +66,7 @@
     "@stryker-mutator/tap-runner": "^9.6.1",
     "@types/node": "25.9.1",
     "c8": "11.0.0",
+    "esbuild": "0.28.1",
     "eslint": "10.4.0",
     "fast-check": "4.8.0",
     "globals": "17.6.0",

@@ -55,6 +55,11 @@ const HIDDEN_STYLE_CASES = [
   ["opacity:-0.5", true], // (bug: Math.abs mapped -1→1, read as visible)
   ["opacity:-0.001", true],
   ["opacity:0.9", false], // ordinary near-opaque value stays visible
+  ["opacity:0%", true], // valid percentage: 0% is fully transparent
+  ["opacity:0.5%", true], // 0.5% = 0.005 fraction, effectively invisible
+  ["opacity:50%", false], // valid percentage: half-opaque, visible
+  ["opacity:0px", false], // invalid unit — a browser ignores it, element stays visible
+  ["opacity:0em", false], // invalid unit — fail open (was parseFloat'd to 0 → over-flagged)
   // ── zero / near-zero size (epsilon) ──
   ["height:0", true],
   ["width:0", true],
@@ -153,6 +158,11 @@ const HIDDEN_STYLE_CASES = [
   ["color:white;background-color:black", false],
   ["background-color:white", false], // color absent — not same-color
   ["color:rgb(0,0,0);background:rgb(255,255,255)", false],
+  // ── unresolved color tokens: can't prove same-color, so fail open ──
+  ["color:var(--fg);background-color:var(--fg)", false], // same var, but resolves via cascade — not provably equal
+  ["color:inherit;background:inherit", false], // inherit color != inherit background-color
+  ["color:currentColor;background-color:currentColor", false],
+  ["color:var(--fg);background:#fff", false], // one side unresolved
   // ── content-visibility ──
   ["content-visibility:hidden", true],
   ["content-visibility:auto", false], // perf hint; content stays visible
@@ -851,6 +861,45 @@ describe("splice fidelity and regressions", () => {
     const out = applyHtml("a <my-widget hidden>SECRET</my-widget> VISIBLE");
     assert.doesNotMatch(out, /SECRET/);
     assert.match(out, /VISIBLE/);
+  });
+  it("splices a hidden void element inline without eating the trailing text", () => {
+    // A void element (<img>, <input>, <br>, …) emits no closing tag, so opening
+    // a balance region for it would run to the container's end and delete the
+    // visible text that follows. Each hidden void must be a single-node splice.
+    for (const voidTag of [
+      "<img hidden src=x>",
+      "<input hidden>",
+      "<br hidden>",
+      "<hr hidden>",
+    ]) {
+      assert.equal(
+        applyHtml(`a ${voidTag} keep me`),
+        `a ${HIDDEN_PLACEHOLDER} keep me`,
+        voidTag,
+      );
+    }
+  });
+  it("splices a hidden void element inside a heading, keeping the heading text", () =>
+    assert.match(
+      applyHtml("# title <img hidden src=x> stays"),
+      /title.*stays/,
+    ));
+  it("does not flag a templated path segment (brace outside query/fragment)", () => {
+    assert.equal(
+      checkExfilUrl("https://docs.example.com/api/{{version}}/guide"),
+      null,
+    );
+    assert.equal(checkExfilUrl("https://example.com/${HOME}/file"), null);
+  });
+  it("still flags a template shape in the query or fragment", () => {
+    assert.equal(
+      checkExfilUrl("https://e.com/p?note={{SECRET}}"),
+      "suspicious query parameter",
+    );
+    assert.equal(
+      checkExfilUrl("https://e.com/p#${TOKEN}"),
+      "suspicious query parameter",
+    );
   });
   it("preserves an autolink and an explicit link verbatim next to a strip", () => {
     const out = applyHtml(

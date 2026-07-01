@@ -58,6 +58,21 @@ def _no_shared_worker_leak() -> Iterator[None]:
     shutdown_worker()
 
 
+@pytest.fixture(autouse=True)
+def _no_bundled_cli_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repo checkout has no bundled CLI — it is a build artifact written into
+    the wheel, not committed. But a developer who ran `scripts/bundle-python-cli.mjs`
+    leaves one on disk, and it takes precedence over the source sibling. Neutralize
+    it by default so the suite resolves the source-tree CLI deterministically
+    regardless; the tests that exercise the bundled path re-point it explicitly.
+    """
+    monkeypatch.setattr(
+        ais,
+        "_BUNDLED_CLI",
+        REPO_ROOT / "python" / "agent_input_sanitizer" / "_bundled" / "absent.mjs",
+    )
+
+
 def test_strips_invisible_layer1() -> None:
     result = sanitize(f"a{ZERO_WIDTH_SPACE}b")
     assert result.cleaned == "ab"
@@ -378,7 +393,41 @@ def test_non_json_stdout_raises_wrapped_error() -> None:
             sanitize("x", persist=False)
 
 
-# ─── CLI resolution: env-var override for a pip-installed package ─────────────
+# ─── CLI resolution: bundled wheel CLI, env-var override, source sibling ──────
+
+REAL_CLI = REPO_ROOT / "bin" / "sanitize-cli.mjs"
+
+
+def test_bundled_cli_used_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A pip-installed wheel has no source sibling but ships a bundled CLI. With
+    # the env override unset, the bundled CLI is resolved and drives sanitization.
+    # (The real source bin stands in for the bundle — this tests the resolution
+    # precedence, which is what ships, not the bundling itself.)
+    monkeypatch.setattr(ais, "_CLI", REPO_ROOT / "bin" / "does-not-exist.mjs")
+    monkeypatch.setattr(ais, "_BUNDLED_CLI", REAL_CLI)
+    monkeypatch.delenv("AGENT_SANITIZER_CLI", raising=False)
+    assert ais._resolve_cli() == REAL_CLI
+    assert sanitize(f"a{ZERO_WIDTH_SPACE}b").cleaned == "ab"
+
+
+def test_bundled_cli_takes_precedence_over_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When both a bundle and a source sibling exist, the bundle wins — an
+    # installed wheel must not accidentally reach for an unrelated source tree.
+    monkeypatch.setattr(ais, "_BUNDLED_CLI", REAL_CLI)
+    monkeypatch.setattr(ais, "_CLI", REPO_ROOT / "bin" / "other-cli.mjs")
+    monkeypatch.delenv("AGENT_SANITIZER_CLI", raising=False)
+    assert ais._resolve_cli() == REAL_CLI
+
+
+def test_env_var_overrides_bundled_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    # AGENT_SANITIZER_CLI is the top-priority escape hatch: it must win even over
+    # a present bundled CLI (e.g. to run against unreleased src/ changes).
+    monkeypatch.setattr(ais, "_BUNDLED_CLI", REPO_ROOT / "bin" / "does-not-exist.mjs")
+    monkeypatch.setenv("AGENT_SANITIZER_CLI", str(REAL_CLI))
+    assert ais._resolve_cli() == REAL_CLI
+    assert sanitize(f"a{ZERO_WIDTH_SPACE}b").cleaned == "ab"
 
 
 def test_cli_env_var_overrides_source_tree(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -16,6 +16,9 @@ __pycache__/
 .uv/
 uv.lock
 
+# Generated: the self-contained CLI bundled into the Python wheel at build time.
+python/agent_input_sanitizer/_bundled/
+
 # Template sync
 .template-version
 

@@ -12,5 +12,9 @@
     "mutate": "src/instructions.mjs,src/gates.mjs"
   },
   { "id": "viewmap-prompt", "mutate": "src/view-map.mjs,src/prompt.mjs" },
-  { "id": "confusables-layer1", "mutate": "src/confusables.mjs,src/layer1.mjs" }
+  {
+    "id": "confusables-layer1",
+    "mutate": "src/confusables.mjs,src/layer1.mjs"
+  },
+  { "id": "joining-type", "mutate": "src/joining-type.mjs" }
 ]

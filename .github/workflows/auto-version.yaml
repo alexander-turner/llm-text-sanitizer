@@ -6,6 +6,13 @@ name: Auto Version Bump and Publish
 # publishing, promotes the `## Unreleased` block to a dated section, commits the
 # release docs back to main (`[skip ci]`), and tags vX.Y.Z. npm + git tags are
 # the source of truth for the version; package.json is not committed.
+#
+# The Python distribution is COUPLED to this release: because the wheel bundles a
+# build of `src/`, npm and PyPI ship the same logic, so they share one version.
+# When version-bump.sh publishes a new npm release it emits `released`/`version`
+# outputs, and the steps below build the wheel at that same version (bundling
+# `src/`) and publish it to PyPI via OIDC trusted publishing. PyPI's Trusted
+# Publisher must therefore point at THIS workflow file (auto-version.yaml).
 
 on:
   push:
@@ -40,6 +47,44 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Auto Version Bump and Publish
+        id: bump
         run: bash scripts/version-bump.sh
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # Coupled Python release: build the wheel at the just-published version
+      # (bundling src/) and publish to PyPI. Gated on a genuine npm release this
+      # run, so a no-op push does nothing here. Node + pnpm (with esbuild for the
+      # bundle) are already set up above; add uv for the build. No caching in the
+      # publish path (zizmor cache-poisoning) — a poisoned cache could tamper with
+      # the artifact shipped to PyPI.
+      - name: Set up uv
+        if: steps.bump.outputs.released == 'true'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false
+
+      - name: Bundle the CLI into the Python package
+        if: steps.bump.outputs.released == 'true'
+        run: node scripts/bundle-python-cli.mjs
+
+      - name: Set the wheel version to the release version
+        if: steps.bump.outputs.released == 'true'
+        run: bash scripts/set-pyproject-version.sh "$RELEASE_VERSION"
+        env:
+          RELEASE_VERSION: ${{ steps.bump.outputs.version }}
+
+      - name: Build the Python distribution
+        if: steps.bump.outputs.released == 'true'
+        run: uv build
+        working-directory: python
+
+      - name: Check distribution metadata
+        if: steps.bump.outputs.released == 'true'
+        run: uvx twine check python/dist/*
+
+      - name: Publish to PyPI
+        if: steps.bump.outputs.released == 'true'
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+        with:
+          packages-dir: python/dist/

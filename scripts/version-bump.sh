@@ -12,6 +12,15 @@ set -e
 
 log() { echo "$@" >&2; }
 
+# Publish a step output for the workflow (no-op outside GitHub Actions). The
+# auto-version workflow reads `released`/`version` to decide whether — and at
+# what version — to also build and publish the coupled Python wheel to PyPI.
+emit_output() {
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    printf '%s\n' "$1" >>"$GITHUB_OUTPUT"
+  fi
+}
+
 # ANTHROPIC_API_KEY is optional: it is used only for changelog prose. The
 # version decision never depends on it. npm authentication uses OIDC trusted
 # publishing (id-token: write in the workflow), so no NODE_AUTH_TOKEN /
@@ -266,6 +275,14 @@ if [ "$PUBLISH_RC" -ne 0 ]; then
 fi
 log "$PUBLISH_OUTPUT"
 log "Published $PACKAGE_NAME@$NEW_VERSION"
+
+# Signal the workflow to build and publish the coupled Python wheel at this same
+# version. Emitted only after a genuine npm publish (not on the "already exists"
+# early-exits above), so PyPI is published exactly when npm is. If a later step
+# in this script fails, npm is already out and the workflow's manual break-glass
+# (publish-python.yaml) can push the matching wheel.
+emit_output "released=true"
+emit_output "version=$NEW_VERSION"
 
 # Promote "## Unreleased" to a dated version section in CHANGELOG.md, using
 # the drafted body.

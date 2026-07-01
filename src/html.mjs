@@ -162,11 +162,23 @@ const NAMED_COLORS = {
 };
 
 /**
+ * True when a canonicalized color is a concrete value we can compare for
+ * equality — a resolved `#rrggbb` hex or `transparent`. `var(--x)`/`inherit`/
+ * `currentColor` canonicalize to their raw token and are NOT concrete: their
+ * effective color depends on the cascade, so a same-color hide can't be proven.
+ * @param {string} canonical
+ * @returns {boolean}
+ */
+function isConcreteColor(canonical) {
+  return canonical === "transparent" || /^#[0-9a-f]{6}$/.test(canonical);
+}
+
+/**
  * Canonicalize a CSS color to lowercase `#rrggbb` so `white`, `#FFF`,
  * `#ffffff`, and `rgb(255, 255, 255)` all compare equal. Returns the trimmed
- * lowercased input unchanged when it is not a form we recognize (so two
- * identical unknown notations still compare equal, and a mismatch never
- * falsely reads as same-color).
+ * lowercased input unchanged when it is not a form we recognize; callers gate
+ * the same-color compare on isConcreteColor so an unresolved token (`var()`,
+ * `inherit`) never falsely reads as a same-color hide.
  * @param {string} raw
  * @returns {string}
  */
@@ -258,11 +270,20 @@ export function isHiddenStyle(styleStr) {
   if (val("content-visibility") === "hidden") return true;
 
   // CSS clamps opacity to [0,1], so any NEGATIVE value renders fully
-  // transparent — `parseFloat < EPSILON` (no `Math.abs`) treats `-1`/`-0.5` as
-  // hidden, where the old `Math.abs` mapped `-1` to `1` (visible) and let a
-  // negative-opacity hide slip through.
+  // transparent — `< EPSILON` (no `Math.abs`) treats `-1`/`-0.5` as hidden,
+  // where the old `Math.abs` mapped `-1` to `1` (visible) and let a
+  // negative-opacity hide slip through. `opacity` is a <number> or <percentage>;
+  // a value with any other unit (`0px`) is an INVALID declaration a browser
+  // ignores (element stays visible), so fail open on anything that isn't a bare
+  // number or percentage rather than `parseFloat`-ing the leading `0` out of it.
   const opacity = val("opacity");
-  if (opacity !== "" && parseFloat(opacity) < NEAR_ZERO_EPSILON) return true;
+  const opacityMatch = opacity.match(
+    /^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)(%?)$/,
+  );
+  if (opacityMatch) {
+    const n = parseFloat(opacityMatch[1]) / (opacityMatch[2] ? 100 : 1);
+    if (n < NEAR_ZERO_EPSILON) return true;
+  }
 
   for (const dim of ["height", "width", "font-size"])
     if (isNearZeroLength(val(dim))) return true;
@@ -294,9 +315,13 @@ export function isHiddenStyle(styleStr) {
   const background =
     canonicalizeColor(val("background-color")) ||
     backgroundColor(val("background"));
-  // Require a real (non-empty) canonical color on both sides: two empty values
-  // are equal, so without this an unstyled element would read as hidden.
-  if (color && background && color === background) return true;
+  // Only flag same-color when BOTH sides resolve to a concrete color (`#rrggbb`
+  // or `transparent`). `var(--x)`, `inherit`, and `currentColor` canonicalize to
+  // their raw token, so two identical unresolved tokens (e.g. the ubiquitous
+  // `color:var(--fg);background:var(--fg)` or `color:inherit;background:inherit`,
+  // which resolve to DIFFERENT effective colors) would otherwise read as hidden
+  // and splice out visible text. Fail open on anything we can't resolve.
+  if (color && color === background && isConcreteColor(color)) return true;
 
   return isOverflowHidden(val);
 }
@@ -313,6 +338,27 @@ export const REPORTED_TAGS = new Set([
   "iframe",
   "svg",
   "math",
+]);
+
+// HTML void elements: they never carry content and never emit a closing tag, so
+// a hidden one (<img hidden>, <input hidden>, …) must be spliced as a single node
+// — opening a balance region for it would run to the container's end (no close
+// ever arrives) and delete the visible text that follows.
+const VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
 ]);
 
 /**
@@ -653,6 +699,17 @@ function scanInlineChildren(node, ranges, warned) {
     collectCommentRanges(value, base, child.position.end.offset, ranges);
     const tagName = isHiddenOpen(value);
     if (tagName) {
+      // A void element never emits a matching close, so a balance region would
+      // extend to the container end and splice out following visible text. Emit
+      // a single-node range instead (the flow/source branch already does this).
+      if (VOID_ELEMENTS.has(tagName)) {
+        ranges.push({
+          start: base,
+          end: child.position.end.offset,
+          kind: "hidden",
+        });
+        continue;
+      }
       state.tag = tagName;
       state.depth = 1;
       state.regionStart = base;
@@ -1031,7 +1088,17 @@ export function checkExfilUrl(url) {
     return null;
   }
   if (SCRIPT_URI_RE.test(url)) return "script-executing URI";
-  if (EXFIL_INDICATORS.some((pattern) => pattern.test(url)))
+  // Template-injection shapes (`${…}`, `{{…}}`) only in the query/fragment: a
+  // brace in the PATH or host is a legitimate templated doc URL
+  // (`/api/{{version}}/guide`), and flagging it both false-positives and
+  // mislabels the location. Sliced from the raw string so an unparseable-host
+  // URL is still covered before `new URL()` would throw.
+  const qfIdx = url.search(/[?#]/);
+  const queryAndFragment = qfIdx === -1 ? "" : url.slice(qfIdx);
+  if (
+    queryAndFragment &&
+    EXFIL_INDICATORS.some((pattern) => pattern.test(queryAndFragment))
+  )
     return "suspicious query parameter";
   // Value-gated keyword params, scanned on the RAW string so a blob in an
   // unparseable-host URL is caught before `new URL()` would throw.

@@ -1,11 +1,15 @@
 /**
- * Pure, zero-dependency invisible-character + ANSI/SGR primitives.
+ * Invisible-character + ANSI/SGR primitives with no external runtime deps.
  *
  * Removes payload-capable Unicode (general-category Cf format chars, variation
  * selectors, blank-rendering fillers, soft hyphens, interior BOMs) while
  * preserving ZWNJ/ZWJ in genuine linguistic and emoji contexts, and reports
- * which categories were removed.
+ * which categories were removed. The linguistic carve-out is driven by the
+ * generated Unicode Joining_Type / virama tables in ./joining-type.mjs (a
+ * sibling data module, not a package), so it decides preservation from the
+ * actual cursive-join semantics rather than a hand-rolled script guess.
  */
+import { joiningType, isVirama } from "./joining-type.mjs";
 
 export const VS = [
   ...Array.from({ length: 16 }, (_, i) => 0xfe00 + i),
@@ -158,57 +162,58 @@ const BOM = "\uFEFF";
 // would treat them as hidden-payload bytes. But they are MANDATORY for correct
 // rendering between letters of several scripts (Arabic/Persian and many Indic
 // scripts) and inside emoji ZWJ sequences — blanket stripping corrupts
-// legitimate non-English output. Preserve them ONLY in an unambiguous
-// linguistic context (immediately between two letters of such a script, or
-// between two members of an emoji ZWJ sequence) and strip them as a payload
-// everywhere else: a long run, scattered past SCATTERED_THRESHOLD, a
-// leading/trailing position, or between Latin/ASCII/secret-shaped characters.
-// Over-strip beats under-strip — the carve-out fires only when BOTH neighbors
-// clearly belong to the context.
+// legitimate non-English output. Preserve them only where they do real
+// rendering work, decided SYNTACTICALLY from the neighbours' Unicode
+// Joining_Type (see isPreservedJoiner): a joiner between two cursive letters, an
+// Indic joiner after a virama, an emoji joiner between emoji components. Strip
+// them as payload everywhere else — leading/trailing, next to a non-joining
+// character (ASCII, punctuation, a non-connecting letter), or inside a joiner
+// run. Over-strip beats under-strip only on genuine ambiguity; a joiner sitting
+// between two real cursive letters is treated as content and kept.
 const ZWNJ = 0x200c;
 const ZWJ = 0x200d;
 
 // Max joiners the carve-out will PRESERVE within one uninterrupted joined
-// sequence (a `letter (joiner letter)*` run, or an emoji ZWJ sequence). A real
+// cluster (a `letter (joiner letter)*` chain, or an emoji ZWJ sequence). A real
 // word or emoji glyph needs only a handful in a row — the longest standard emoji
 // ZWJ sequences (family-of-four, profession+ZWJ) carry three; a Persian
 // compound a couple. Past this many consecutive PRESERVED joiners with no real
-// gap between them, the run is treated as a zero-width payload channel (an
-// attacker alternates `letter joiner letter joiner …` to stay both under the
-// scatter floor AND in a per-joiner "linguistic" context) and the surplus
-// joiners are stripped. The counter resets at any genuine gap — two visible
-// characters in a row, i.e. text that is NOT part of a joined cluster — so an
-// ordinary single linguistic/emoji joiner per word is always preserved.
+// gap between them, the chain is treated as a zero-width payload channel (an
+// attacker alternates `letter joiner letter joiner …` so every joiner still sits
+// between two cursive letters) and the surplus joiners are stripped. The counter
+// resets at any genuine gap — two visible characters in a row, i.e. text that is
+// NOT part of a joined cluster — so an ordinary single joiner per word is kept.
 export const CONSECUTIVE_JOINER_CAP = 8;
 
-// Max joiners the carve-out will PRESERVE across the WHOLE string, summed over
-// every cluster (unlike CONSECUTIVE_JOINER_CAP, this counter never resets at a
-// gap). It closes a covert channel the consecutive cap alone leaves open: an
-// attacker writes `letter joiner letter letter` repeatedly so each joiner sits
-// between two linguistic letters (preserved) and every cluster is separated by a
-// real gap (resetting joinerRun), threading many one-bit joiners through while
-// staying under SCATTERED_THRESHOLD — so the consecutive cap never trips and
-// `found` stays empty. A document-wide budget catches the aggregate: once more
-// than this many joiners would be preserved, the surplus is stripped as payload
-// AND the category is reported, so the result is never silently carrying a large
-// hidden joiner channel.
-//
-// Sizing (precision over recall — err toward preserving real text): the scatter
-// floor already caps TOTAL invisibles at SCATTERED_THRESHOLD (30); above it the
-// carve-out is off and every joiner is stripped. So the only joiners this budget
-// governs are those in texts with fewer than 30 total invisibles. Within that
-// window, legitimate multilingual prose stays well under 16: a Persian sentence
-// carries a handful of ZWNJ, the longest standard emoji ZWJ sequences three.
-// Genuine text dense enough to need >16 joiners would also push total invisibles
-// past the scatter floor and be handled there. 16 sits comfortably above real
-// usage yet well under the 25-joiner PoC, so honest text is preserved un-flagged
-// while a stuffed channel is capped and surfaced.
+// Floor on the document-wide preserve budget, shared by both preserve kinds
+// (see `kind` in analyzeCarve: joiners AND presentation selectors draw from
+// the same counter). The Joining_Type gate strips joiners that do no
+// rendering work regardless of count, so the bulk covert channel (ZWNJ
+// scattered through Latin/ASCII/mixed text) is closed by shape, not by
+// counting. What remains is the residual channel of MEANINGFUL joiners/
+// selectors stuffed into genuine cover text — each individually legitimate,
+// so indistinguishable one at a time. THIS budget (with CONSECUTIVE_JOINER_CAP
+// and SCATTERED_THRESHOLD) is the explicit, tunable bound on that residual
+// channel; it is not derived, and tightening it trades covert-channel width for
+// clipping genuinely dense prose or emoji-dense text. The allowance is
+// proportional to visible length (PRESERVED_JOINER_PER_VISIBLE), never below
+// this floor; the floor keeps short but joiner/selector-dense strings (a lone
+// emoji ZWJ sequence, a two-word Persian phrase) un-flagged. Past the
+// allowance the surplus is stripped AND reported.
 export const TOTAL_PRESERVED_JOINER_BUDGET = 16;
 
+// Visible code points required per additional preserved joiner above the floor.
+// Measured formal/literary Persian runs ~1 ZWNJ per 5 words (~25 visible chars);
+// 1-per-8 sits comfortably above real prose density while still bounding the
+// residual channel to a fixed fraction of the cover text.
+export const PRESERVED_JOINER_PER_VISIBLE = 8;
+
 // Scripts whose orthography uses ZWNJ/ZWJ between letters as a rendering
-// control. Single source of truth: LINGUISTIC_LETTER is built from this list,
-// and the test suite drives one preserve-case per entry, so adding a script
-// here without a matching test fails.
+// control. The runtime gate is now script-agnostic (it reads Joining_Type, so it
+// covers every cursive/Brahmic script, not just these), but this list remains
+// the public, TESTED SSOT of the scripts the carve-out is designed for: the
+// suite drives one preserve-case per entry, so a regression in any of them
+// fails.
 export const LINGUISTIC_SCRIPTS = [
   "Arabic",
   "Devanagari",
@@ -222,15 +227,19 @@ export const LINGUISTIC_SCRIPTS = [
   "Malayalam",
   "Sinhala",
 ];
-const LINGUISTIC_LETTER = new RegExp(
-  `[${LINGUISTIC_SCRIPTS.map((script) => `\\p{Script=${script}}`).join("")}]`,
-  "u",
-);
 // Left side of an emoji joiner: a pictograph or a skin-tone modifier (a base
 // emoji may carry a modifier before the joiner, e.g. a health-worker sequence).
 const EMOJI_LEFT = /[\p{Extended_Pictographic}\p{Emoji_Modifier}]/u;
 // Right side of an emoji joiner is always the next component's base pictograph.
 const EMOJI_BASE = /\p{Extended_Pictographic}/u;
+// A variation selector legitimately sits between a base pictograph and a
+// following ZWJ (🏳️‍🌈 = flag base, VS16, ZWJ, rainbow; 👁️‍🗨️), so the joiner's real
+// left neighbor for the emoji test is the pictograph, not the selector.
+const VARIATION_SELECTOR = new RegExp(`[${VS}]`, "u");
+// U+FE0F (VS16) forces emoji presentation, U+FE0E (VS15) forces text
+// presentation (☺︎ vs ☺); either one directly after a pictograph is part of a
+// visible glyph, not a hidden variation-selector run.
+const PRESENTATION_SELECTORS = new Set([0xfe0e, 0xfe0f]);
 
 // Non-global single-char classifiers (CHECKS carry `g`, whose lastIndex is
 // stateful across `.test`). carveStrip uses these to attribute each removed
@@ -251,30 +260,136 @@ function classify(ch) {
   return null;
 }
 
-/**
- * True when `ch` (a ZWNJ/ZWJ) sits in an unambiguous linguistic context and so
- * must be preserved rather than stripped. `prev`/`next` are the adjacent code
- * points (single-code-point strings), or "" at a string boundary.
- * @param {string} ch
- * @param {string} prev
- * @param {string} next
- * @returns {boolean}
- */
-function isPreservedJoiner(ch, prev, next) {
-  const cp = ch.codePointAt(0);
-  if (cp !== ZWNJ && cp !== ZWJ) return false;
-  // prev/next are "" at a string boundary (see carveStrip), so a leading or
-  // trailing joiner matches neither script nor emoji class and falls through.
-  if (LINGUISTIC_LETTER.test(prev) && LINGUISTIC_LETTER.test(next)) return true;
-  // Emoji ZWJ sequences use ZWJ only, never ZWNJ.
-  if (cp === ZWJ && EMOJI_LEFT.test(prev) && EMOJI_BASE.test(next)) return true;
-  return false;
+/** A cursive-joining letter: Joining_Type dual, right, or left. (C is a join
+ * control, T is a transparent mark, U is non-joining — none is a letter that a
+ * ZWNJ/ZWJ does rendering work between.)
+ * @param {string} jt @returns {boolean} */
+const isCursiveLetter = (jt) => jt === "D" || jt === "R" || jt === "L";
+
+/** The Joining_Type of a single-code-point string, or "U" for "" (boundary).
+ * @param {string} ch @returns {string} */
+const jtOf = (ch) =>
+  ch ? joiningType(/** @type {number} */ (ch.codePointAt(0))) : "U";
+
+/** True when `ch` is itself a ZWNJ/ZWJ (used to reject joiner runs).
+ * @param {string} ch @returns {boolean} */
+function isJoinControl(ch) {
+  const cp = ch ? ch.codePointAt(0) : -1;
+  return cp === ZWNJ || cp === ZWJ;
 }
 
 /**
- * Bulk strip (the common path: no ZWNJ/ZWJ present, so no carve-out can apply).
- * A single regex pass removes every payload-capable char; `found` names the
- * category codes present via `.search` (which ignores the `g` lastIndex).
+ * The nearest neighbour of index `i` in direction `dir`, skipping Transparent
+ * (combining-mark) code points, as the Unicode cursive-joining algorithm does —
+ * a harakat between a letter and a ZWNJ does not break the join. Returns "" past
+ * the string boundary.
+ * @param {string[]} cps @param {number} i @param {number} dir  -1 or +1
+ * @returns {string}
+ */
+function effectiveNeighbor(cps, i, dir) {
+  for (let j = i + dir; j >= 0 && j < cps.length; j += dir) {
+    if (jtOf(cps[j]) !== "T") return cps[j];
+  }
+  return "";
+}
+
+/**
+ * True when the joiner at `cps[i]` does real rendering work and so must be
+ * preserved rather than stripped, decided from the neighbours' Joining_Type:
+ *   - emoji ZWJ: between two emoji components (its left pictograph may sit behind
+ *     a VS16, so step over selectors — see leftNonSelector);
+ *   - Indic joiner: immediately after a virama;
+ *   - Arabic-family joiner: between two cursive letters (ZWNJ needs both, ZWJ at
+ *     least one — it forces a connected form). A joiner whose effective neighbour
+ *     is ANOTHER joiner is a run (a zero-width payload channel) and is rejected.
+ * Leading/trailing joiners fall out because "" has Joining_Type U.
+ * @param {string[]} cps @param {number} i
+ * @returns {boolean}
+ */
+function isPreservedJoiner(cps, i) {
+  const cp = /** @type {number} */ (cps[i].codePointAt(0));
+  if (cp !== ZWNJ && cp !== ZWJ) return false;
+  const prev = cps[i - 1] ?? "";
+  const next = cps[i + 1] ?? "";
+  // Emoji ZWJ sequences use ZWJ only; the real left neighbour is the pictograph.
+  if (
+    cp === ZWJ &&
+    EMOJI_LEFT.test(leftNonSelector(cps, i)) &&
+    EMOJI_BASE.test(next)
+  )
+    return true;
+  // Indic: meaningful only immediately after a virama (halant / half-form).
+  if (prev && isVirama(/** @type {number} */ (prev.codePointAt(0))))
+    return true;
+  // Arabic-family cursive joining, on the nearest non-Transparent neighbours.
+  const left = effectiveNeighbor(cps, i, -1);
+  const right = effectiveNeighbor(cps, i, 1);
+  if (isJoinControl(left) || isJoinControl(right)) return false; // joiner run
+  const lc = isCursiveLetter(jtOf(left));
+  const rc = isCursiveLetter(jtOf(right));
+  return cp === ZWNJ ? lc && rc : lc || rc;
+}
+
+/**
+ * True when `cps[i]` is a presentation selector (VS15 U+FE0E or VS16 U+FE0F)
+ * directly after a pictograph/skin-tone modifier — part of a visible glyph,
+ * not a hidden VS run, so it is preserved (a longer selector run still
+ * surfaces: the next selector's left neighbour is itself a selector, not a
+ * pictograph).
+ * @param {string[]} cps @param {number} i
+ * @returns {boolean}
+ */
+function isEmojiPresentationSelector(cps, i) {
+  return (
+    PRESENTATION_SELECTORS.has(/** @type {number} */ (cps[i].codePointAt(0))) &&
+    EMOJI_LEFT.test(cps[i - 1] ?? "")
+  );
+}
+
+/**
+ * Per-invisible carve-out analysis, shared by carveStrip and
+ * countPayloadInvisible: for each code point, its CHECKS category (null when
+ * visible) and its preserve `kind` ("joiner" | "emojivs" | null). Everything
+ * invisible that is NOT preserve-eligible is payload; the scatter floor counts
+ * only that, so meaningful joiners never push honest prose over the threshold.
+ * @param {string[]} cps
+ * @returns {{ codes: (string|null)[], kind: (string|null)[], payloadInvis: number, visibleLen: number }}
+ */
+function analyzeCarve(cps) {
+  const codes = cps.map(classify);
+  const kind = cps.map((_, i) => {
+    if (codes[i] === null) return null;
+    if (isPreservedJoiner(cps, i)) return "joiner";
+    if (isEmojiPresentationSelector(cps, i)) return "emojivs";
+    return null;
+  });
+  let payloadInvis = 0;
+  let visibleLen = 0;
+  for (let i = 0; i < cps.length; i++) {
+    if (codes[i] === null) visibleLen++;
+    else if (kind[i] === null) payloadInvis++;
+  }
+  return { codes, kind, payloadInvis, visibleLen };
+}
+
+/**
+ * Count the PAYLOAD invisible code points in `text`: those the carve-out would
+ * strip, excluding ZWNJ/ZWJ (and emoji VS16) that do real rendering work.
+ * Consumers that gate on invisible density (e.g. the prompt classifier's scatter
+ * threshold) use this so legitimate dense multilingual prose is not mistaken for
+ * a hidden channel.
+ * @param {string} text
+ * @returns {number}
+ */
+export function countPayloadInvisible(text) {
+  return analyzeCarve(Array.from(text)).payloadInvis;
+}
+
+/**
+ * Bulk strip (the common path: {@link needsCarveOut} found nothing the
+ * carve-out could apply to). A single regex pass removes every payload-
+ * capable char; `found` names the category codes present via `.search`
+ * (which ignores the `g` lastIndex).
  * @param {string} body
  * @returns {{ cleaned: string, found: string[] }}
  */
@@ -283,6 +398,21 @@ function bulkStrip(body) {
     ([code]) => code,
   );
   return { cleaned: body.replace(STRIP, ""), found };
+}
+
+/**
+ * The nearest code point left of index `i` that is not a variation selector, or
+ * "" at the string start. An emoji ZWJ sequence can place a VS16 between the base
+ * pictograph and the ZWJ, so the joiner's real left neighbor is found by stepping
+ * over any variation selector(s).
+ * @param {string[]} cps
+ * @param {number} i
+ * @returns {string}
+ */
+function leftNonSelector(cps, i) {
+  let p = i - 1;
+  while (p >= 0 && VARIATION_SELECTOR.test(cps[p])) p--;
+  return cps[p] ?? "";
 }
 
 /**
@@ -298,47 +428,54 @@ function bulkStrip(body) {
  * @returns {{ cleaned: string, found: string[] }}
  */
 function carveStrip(body) {
-  // SCATTERED_THRESHOLD is the floor: past it, treat every invisible as payload
-  // regardless of context (threshold-evasion catch — over-strip beats under).
-  // Materialise codepoints once; count invisibles in a first pass so we know
-  // whether the carve-out applies before building the output string.
   const cps = Array.from(body);
-  let invisCount = 0;
-  for (const ch of cps) if (classify(ch) !== null) invisCount++;
-  const allowCarveOut = invisCount < SCATTERED_THRESHOLD;
+  // Pass 1: classify + evaluate the gate once (see analyzeCarve). Only PAYLOAD
+  // invisibles count toward the scatter floor, so a meaningful-joiner-dense text
+  // (formal Persian, a long Devanagari conjunct run) stays under it.
+  const { codes, kind, payloadInvis, visibleLen } = analyzeCarve(cps);
+  // SCATTERED_THRESHOLD is the floor on payload invisibles: past it the document
+  // is drowning in hidden bytes, so the carve-out is off and even a meaningful
+  // joiner is stripped (threshold-evasion catch — over-strip beats under).
+  const allowCarveOut = payloadInvis < SCATTERED_THRESHOLD;
+  // Document-wide preserve allowance, proportional to visible text but never
+  // below the floor (see TOTAL_PRESERVED_JOINER_BUDGET / PRESERVED_JOINER_PER_VISIBLE).
+  const maxPreserved = Math.max(
+    TOTAL_PRESERVED_JOINER_BUDGET,
+    Math.ceil(visibleLen / PRESERVED_JOINER_PER_VISIBLE),
+  );
+
   const foundCodes = new Set();
   let out = "";
-  // Joiners preserved so far in the current uninterrupted joined sequence. A
-  // genuine gap (two visible chars in a row — see prevVisible) resets it to 0;
-  // once it would exceed the cap the surplus joiners are stripped as payload.
+  // Preserved JOINERS in the current uninterrupted cluster (emoji presentation
+  // selectors don't chain, so they are exempt). A genuine gap (two visible chars
+  // in a row — see prevVisible) resets it; past the cap the surplus is stripped.
   let joinerRun = 0;
-  // Joiners preserved so far across the WHOLE string — never reset at a gap, so
-  // it caps the document-wide channel the per-cluster joinerRun cannot (see
-  // TOTAL_PRESERVED_JOINER_BUDGET). Past the budget a joiner is stripped and its
-  // category reported, even though it is in a per-char linguistic context.
+  // Preserved joiners/selectors across the WHOLE string — never reset at a gap,
+  // so it bounds the document-wide channel joinerRun cannot. Past maxPreserved a
+  // joiner is stripped and its category reported.
   let preservedTotal = 0;
   let prevVisible = false;
   for (let i = 0; i < cps.length; i++) {
-    const ch = cps[i];
-    const code = classify(ch);
+    const code = codes[i];
     if (code === null) {
       // A visible char following another visible char is a real word/segment
       // boundary, not a join — the joined cluster (if any) ended here.
       if (prevVisible) joinerRun = 0;
       prevVisible = true;
-      out += ch; // ordinary visible character
+      out += cps[i]; // ordinary visible character
       continue;
     }
+    const joiner = kind[i] === "joiner";
     if (
       allowCarveOut &&
-      joinerRun < CONSECUTIVE_JOINER_CAP &&
-      preservedTotal < TOTAL_PRESERVED_JOINER_BUDGET &&
-      isPreservedJoiner(ch, cps[i - 1] ?? "", cps[i + 1] ?? "")
+      kind[i] !== null &&
+      preservedTotal < maxPreserved &&
+      (!joiner || joinerRun < CONSECUTIVE_JOINER_CAP)
     ) {
-      joinerRun++;
+      if (joiner) joinerRun++;
       preservedTotal++;
-      prevVisible = false; // a joiner keeps the cluster open
-      out += ch;
+      prevVisible = false; // a joiner/selector keeps the cluster open
+      out += cps[i];
       continue;
     }
     foundCodes.add(code);
@@ -351,14 +488,22 @@ function carveStrip(body) {
 }
 
 /**
- * True when `body` holds at least one ZWNJ/ZWJ (so the carve-out may apply).
+ * True when `body` holds at least one ZWNJ/ZWJ or presentation selector
+ * (VS15 U+FE0E / VS16 U+FE0F) — anything the carve-out in {@link carveStrip}
+ * might preserve. A lone pictograph + selector with no joiner ANYWHERE else in
+ * the document (e.g. "I ❤️ pizza" or "I ❤︎ pizza") still needs the carve-out's
+ * per-neighbor analysis, or bulkStrip strips the selector unconditionally and
+ * corrupts a legitimate glyph.
  * @param {string} body
  * @returns {boolean}
  */
-function hasJoinControl(body) {
+function needsCarveOut(body) {
   return (
     body.includes(String.fromCodePoint(ZWNJ)) ||
-    body.includes(String.fromCodePoint(ZWJ))
+    body.includes(String.fromCodePoint(ZWJ)) ||
+    [...PRESENTATION_SELECTORS].some((cp) =>
+      body.includes(String.fromCodePoint(cp)),
+    )
   );
 }
 
@@ -375,7 +520,7 @@ function hasJoinControl(body) {
 export function stripInvisibleWithReport(text) {
   const hasLeadingBom = text.charCodeAt(0) === 0xfeff;
   const body = hasLeadingBom ? text.slice(1) : text;
-  const { cleaned, found } = hasJoinControl(body)
+  const { cleaned, found } = needsCarveOut(body)
     ? carveStrip(body)
     : bulkStrip(body);
   return { cleaned: hasLeadingBom ? BOM + cleaned : cleaned, found };
