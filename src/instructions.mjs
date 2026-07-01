@@ -30,6 +30,72 @@ import {
   stripInvisible,
 } from "./invisible.mjs";
 
+// Emoji carve-out for the scatter floor, mirroring src/invisible.mjs. A
+// STRIP-class code point that is genuinely part of a VISIBLE emoji is not a
+// hidden channel and must not count toward the scattered-invisible
+// threshold-evasion floor, or an emoji-dense but benign document trips a false
+// positive (alert fatigue). Two such cases:
+//   - U+FE0F (VS16) directly after an Extended_Pictographic/Emoji_Modifier: a
+//     presentation selector on a real glyph (❤️), not a variation-selector run.
+//   - U+200D (ZWJ) joining two pictograph components (🏳️‍🌈): the joiner of an
+//     emoji ZWJ sequence, not a zero-width payload.
+// Anything NOT in an emoji context still counts, so a genuine selector/joiner
+// run keeps firing — precision preserved, recall on real payloads unchanged.
+const EMOJI_LEFT = /[\p{Extended_Pictographic}\p{Emoji_Modifier}]/u;
+const EMOJI_BASE = /\p{Extended_Pictographic}/u;
+const VARIATION_SELECTOR = new RegExp(
+  `[${[
+    ...Array.from({ length: 16 }, (_, i) => 0xfe00 + i),
+    ...Array.from({ length: 240 }, (_, i) => 0xe0100 + i),
+  ]
+    .map((c) => String.fromCodePoint(c))
+    .join("")}]`,
+  "u",
+);
+const VS16 = 0xfe0f;
+const ZWJ = 0x200d;
+
+/**
+ * The nearest code point left of `i` that is not a variation selector, or "" at
+ * the start. An emoji ZWJ sequence can place a VS16 between the base pictograph
+ * and the ZWJ (🏳️‍🌈), so the joiner's real left neighbor is found by stepping over
+ * any selector(s). Mirrors leftNonSelector in invisible.mjs.
+ * @param {string[]} cps
+ * @param {number} i
+ * @returns {string}
+ */
+function leftNonSelector(cps, i) {
+  let p = i - 1;
+  while (p >= 0 && VARIATION_SELECTOR.test(cps[p])) p--;
+  return cps[p] ?? "";
+}
+
+/**
+ * Count invisible (STRIP-class) code points in `content` that are NOT part of a
+ * visible emoji — the input to the scatter floor. A VS16 on a real pictograph
+ * and an emoji-sequence ZWJ are discounted (see the carve-out note above); every
+ * other STRIP-class char counts. Iterates by code point so an astral pictograph
+ * neighbor is recognized as one unit.
+ * @param {string} content
+ * @returns {number}
+ */
+function countInvisibleForScatter(content) {
+  const single = new RegExp(STRIP.source, "u");
+  const cps = [...content];
+  let count = 0;
+  for (let i = 0; i < cps.length; i++) {
+    if (!single.test(cps[i])) continue;
+    const cp = cps[i].codePointAt(0);
+    const isEmojiSelector = cp === VS16 && EMOJI_LEFT.test(cps[i - 1] ?? "");
+    const isEmojiJoiner =
+      cp === ZWJ &&
+      EMOJI_LEFT.test(leftNonSelector(cps, i)) &&
+      EMOJI_BASE.test(cps[i + 1] ?? "");
+    if (!isEmojiSelector && !isEmojiJoiner) count++;
+  }
+  return count;
+}
+
 /**
  * Decode a run of invisible characters to its likely payload. Recognizes the
  * two common smuggling encodings — Unicode tag characters (U+E0001–U+E007F map
@@ -54,11 +120,17 @@ export function decodeRun(run) {
     [0x200d, "|"],
   ]);
 
-  if (tagAscii.length > 0) {
+  const zwCount = cps.filter((cp) => ZW_BIT.has(cp)).length;
+
+  // Only take the tag-characters branch when tag chars are the MAJORITY of the
+  // run. A run that is overwhelmingly zero-width bits plus ONE stray tag char is
+  // a zero-width-binary payload, not a tag payload — labeling it "Unicode tag
+  // characters → ASCII" buries the real (binary) payload behind the wrong
+  // method. Reporting accuracy only: the strip removes the whole run regardless.
+  if (tagAscii.length > 0 && tagAscii.length > cps.length / 2) {
     // A run can carry BOTH tag-ASCII and zero-width chars; the strip removes the
     // whole run regardless, but the operator-facing `decoded` must reflect the
     // zero-width portion too rather than silently dropping it.
-    const zwCount = cps.filter((cp) => ZW_BIT.has(cp)).length;
     const note = zwCount > 0 ? ` + ${zwCount} zero-width char(s)` : "";
     return {
       method: "Unicode tag characters → ASCII",
@@ -66,11 +138,20 @@ export function decodeRun(run) {
     };
   }
 
-  if (cps.every((cp) => ZW_BIT.has(cp))) {
-    const bits = cps.map((cp) => ZW_BIT.get(cp)).join("");
+  // Zero-width-binary branch: the whole run is ZW bits, OR ZW bits are the
+  // majority (so a run of many bits plus a stray tag/other char is decoded as
+  // the binary payload it actually is, not mislabeled). Decode only the ZW code
+  // points; a `+ N other char(s)` note keeps any non-ZW portion visible.
+  if (zwCount > 0 && zwCount > cps.length / 2) {
+    const bits = cps
+      .filter((cp) => ZW_BIT.has(cp))
+      .map((cp) => ZW_BIT.get(cp))
+      .join("");
+    const otherCount = cps.length - zwCount;
+    const note = otherCount > 0 ? ` + ${otherCount} other char(s)` : "";
     return {
       method: "zero-width binary encoding",
-      decoded: `[${cps.length} zero-width chars: ${bits.slice(0, 80)}]`,
+      decoded: `[${zwCount} zero-width chars: ${bits.slice(0, 80)}]${note}`,
     };
   }
 
@@ -104,9 +185,9 @@ export function scanText(content) {
 
   // Threshold-evasion: scattered invisible chars not in a long run can still be
   // a payload. Always evaluated; chars already in a run are excluded so they
-  // aren't double-counted.
-  const allInvisible = content.match(STRIP);
-  const scattered = (allInvisible ? allInvisible.length : 0) - runChars;
+  // aren't double-counted. Emoji presentation selectors (U+FE0F on a real
+  // pictograph) are discounted so an emoji-dense benign doc doesn't over-fire.
+  const scattered = countInvisibleForScatter(content) - runChars;
   if (scattered >= SCATTERED_THRESHOLD) {
     findings.push({
       line: 0,

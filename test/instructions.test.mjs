@@ -104,11 +104,35 @@ describe("decodeRun", () => {
 
   it("counts ZWNJ and ZWJ in the mixed-run note, not just ZWSP", () => {
     // The note counts every ZW-bit char (ZWSP/ZWNJ/ZWJ), so a mix of all three
-    // alongside tag-ASCII reports the full count.
+    // alongside a tag-MAJORITY ASCII portion reports the full ZW count. Tag chars
+    // must be the majority for the tag branch to fire (see the label-accuracy
+    // tests below), so use 4 tag chars against 3 ZW chars.
     const result = decodeRun(
-      `${tagChars("x")}${cp(0x200b)}${cp(0x200c)}${cp(0x200d)}`,
+      `${tagChars("xyzw")}${cp(0x200b)}${cp(0x200c)}${cp(0x200d)}`,
     );
-    assert.equal(result.decoded, "x + 3 zero-width char(s)");
+    assert.equal(result.decoded, "xyzw + 3 zero-width char(s)");
+  });
+
+  it("reports the binary decode (not the tag label) when ZW bits are the majority", () => {
+    // A run of many zero-width bits plus ONE stray tag char is a zero-width-binary
+    // payload, not a tag payload. Labeling it "Unicode tag characters → ASCII"
+    // would bury the real payload behind the wrong method — report the binary
+    // decode and note the stray char instead. (Reporting accuracy: the strip
+    // removes the whole run regardless.)
+    const result = decodeRun(`${zwRun(11)}${tagChars("!")}`);
+    assert.equal(result.method, "zero-width binary encoding");
+    assert.equal(
+      result.decoded,
+      `[11 zero-width chars: ${"0".repeat(11)}] + 1 other char(s)`,
+    );
+  });
+
+  it("still reports the tag decode for a genuine tag-majority run with a stray ZW char", () => {
+    // The dual of the case above: tag chars are the majority, so the tag branch
+    // fires and the single ZW char is noted, not promoted to the payload.
+    const result = decodeRun(`${tagChars("rm -rf /")}${cp(0x200b)}`);
+    assert.equal(result.method, "Unicode tag characters → ASCII");
+    assert.equal(result.decoded, "rm -rf / + 1 zero-width char(s)");
   });
 });
 
@@ -197,6 +221,52 @@ describe("scanText", () => {
     const findingsB = scanText(`head ${zwRun(SCATTERED_THRESHOLD + 5)} tail\n`);
     assert.equal(findingsB.length, 1);
     assert.match(findingsB[0].method, /zero-width binary/);
+  });
+
+  it("does NOT flag an emoji-dense benign doc (VS16 on real pictographs discounted)", () => {
+    // >=30 red-heart emoji, each ❤ (U+2764, Extended_Pictographic) + U+FE0F
+    // (VS16). Pre-fix each VS16 counted toward the scatter floor, so 30 hearts
+    // tripped the "scattered invisible chars" finding — a false positive. The
+    // selector is part of a visible emoji, so it must be discounted: zero findings.
+    const heart = `${cp(0x2764)}${cp(0xfe0f)}`;
+    const doc = Array.from({ length: 30 }, () => heart).join("\n") + "\n";
+    assert.deepEqual(scanText(doc), []);
+  });
+
+  it("does NOT flag a doc dense with rainbow-flag ZWJ emoji", () => {
+    // 🏳️‍🌈 = white-flag base (U+1F3F3) + VS16 + ZWJ + rainbow (U+1F308). The VS16
+    // sits on a real pictograph and the ZWJ joins the sequence — none is a hidden
+    // channel. 30 of them must yield zero findings.
+    const flag = `${cp(0x1f3f3)}${cp(0xfe0f)}${cp(0x200d)}${cp(0x1f308)}`;
+    const doc = Array.from({ length: 30 }, () => flag).join(" ") + "\n";
+    assert.deepEqual(scanText(doc), []);
+  });
+
+  it("STILL flags a genuine scattered VS16 run not anchored to pictographs", () => {
+    // Precision guard: the discount is only for a VS16 immediately after a
+    // pictograph/modifier. A run of VS16 selectors each preceded by an ordinary
+    // ASCII letter (no pictograph) is a real hidden variation-selector channel
+    // and must still fire once it crosses the floor.
+    const evasion = Array.from(
+      { length: SCATTERED_THRESHOLD },
+      () => `a${cp(0xfe0f)}`,
+    ).join("");
+    const findings = scanText(evasion);
+    assert.equal(findings.length, 1);
+    assert.match(findings[0].method, /scattered/);
+    assert.equal(findings[0].charCount, SCATTERED_THRESHOLD);
+  });
+
+  it("STILL flags a real scattered payload of non-emoji invisibles", () => {
+    // The emoji discount must not weaken recall on a genuine payload: >=30
+    // scattered ZWSPs (no emoji anywhere) still cross the floor and fire.
+    const chunks = Array.from({ length: SCATTERED_THRESHOLD }, (_, i) =>
+      i % 3 === 0 ? `x${cp(0x200b)}` : cp(0x200b),
+    ).join("");
+    const findings = scanText(chunks);
+    assert.equal(findings.length, 1);
+    assert.match(findings[0].method, /scattered/);
+    assert.equal(findings[0].charCount, SCATTERED_THRESHOLD);
   });
 });
 
