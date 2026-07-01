@@ -884,6 +884,23 @@ describe("splice fidelity and regressions", () => {
       applyHtml("# title <img hidden src=x> stays"),
       /title.*stays/,
     ));
+  it("does not flag a templated path segment (brace outside query/fragment)", () => {
+    assert.equal(
+      checkExfilUrl("https://docs.example.com/api/{{version}}/guide"),
+      null,
+    );
+    assert.equal(checkExfilUrl("https://example.com/${HOME}/file"), null);
+  });
+  it("still flags a template shape in the query or fragment", () => {
+    assert.equal(
+      checkExfilUrl("https://e.com/p?note={{SECRET}}"),
+      "suspicious query parameter",
+    );
+    assert.equal(
+      checkExfilUrl("https://e.com/p#${TOKEN}"),
+      "suspicious query parameter",
+    );
+  });
   it("preserves an autolink and an explicit link verbatim next to a strip", () => {
     const out = applyHtml(
       `x <span style="display:none">SECRET</span> see <https://example.com/page> and [click](https://example.com/explicit)`,

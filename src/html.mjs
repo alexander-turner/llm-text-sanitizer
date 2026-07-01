@@ -1088,7 +1088,17 @@ export function checkExfilUrl(url) {
     return null;
   }
   if (SCRIPT_URI_RE.test(url)) return "script-executing URI";
-  if (EXFIL_INDICATORS.some((pattern) => pattern.test(url)))
+  // Template-injection shapes (`${…}`, `{{…}}`) only in the query/fragment: a
+  // brace in the PATH or host is a legitimate templated doc URL
+  // (`/api/{{version}}/guide`), and flagging it both false-positives and
+  // mislabels the location. Sliced from the raw string so an unparseable-host
+  // URL is still covered before `new URL()` would throw.
+  const qfIdx = url.search(/[?#]/);
+  const queryAndFragment = qfIdx === -1 ? "" : url.slice(qfIdx);
+  if (
+    queryAndFragment &&
+    EXFIL_INDICATORS.some((pattern) => pattern.test(queryAndFragment))
+  )
     return "suspicious query parameter";
   // Value-gated keyword params, scanned on the RAW string so a blob in an
   // unparseable-host URL is caught before `new URL()` would throw.
