@@ -181,6 +181,19 @@ describe("foldConfusables", () => {
     );
   });
 
+  it("throws when latinEquivalent is empty (would silently delete the glyph)", () => {
+    // An empty canon slips past the ASCII loop (never iterates) and would splice
+    // the glyph to nothing: foldConfusables("/аb", …) → "/b". Must fail loud,
+    // matching the non-ASCII guard, rather than delete a path/command character.
+    assert.throws(
+      () =>
+        foldConfusables(`/${CYR_A}b`, [
+          { index: 1, char: CYR_A, latinEquivalent: "" },
+        ]),
+      /empty latinEquivalent/,
+    );
+  });
+
   it("allows a multi-character ASCII canon (e.g. a ligature fold)", () => {
     // Precision: a legitimate one-to-many ASCII fold (½ → 1/2, œ → oe) must NOT
     // be rejected by the ASCII guard — only non-ASCII replacements are refused.

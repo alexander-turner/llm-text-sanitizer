@@ -116,6 +116,17 @@ export function foldConfusables(text, findings) {
       throw new Error(
         `Confusable finding does not match input at index ${finding.index}: expected ${JSON.stringify(finding.char)}`,
       );
+    // An empty `latinEquivalent` slips past the ASCII loop below (it never
+    // iterates) and would splice the glyph to nothing — silently DELETING a
+    // character from a path/command. That is the same class of silent corruption
+    // the non-ASCII guard rejects, so fail loud here too rather than let a
+    // buggy/adversarial scanner erase input.
+    if (finding.latinEquivalent === "")
+      throw new Error(
+        `Confusable finding for ${JSON.stringify(
+          finding.char,
+        )} at index ${finding.index} has an empty latinEquivalent`,
+      );
     // The replacement must be the ASCII canon the contract promises. A non-ASCII
     // `latinEquivalent` would fold one confusable into ANOTHER look-alike (e.g.
     // Cyrillic а → Cyrillic е), defeating the whole point — the cross-script
