@@ -1,4 +1,4 @@
-"""agent-secret-redactor: an agent-agnostic secret-redaction engine.
+"""The secret-redaction engine: an agent-agnostic redactor.
 
 Plain text in, redacted text (or a rehydration map) out. detect-secrets is the
 single detection oracle, supplemented with custom detectors for formats it lacks,
@@ -48,5 +48,3 @@ __all__ = [
     "redact_configured",
     "handle_request",
 ]
-
-__version__ = "0.1.0"
