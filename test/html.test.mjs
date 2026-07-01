@@ -852,6 +852,28 @@ describe("splice fidelity and regressions", () => {
     assert.doesNotMatch(out, /SECRET/);
     assert.match(out, /VISIBLE/);
   });
+  it("splices a hidden void element inline without eating the trailing text", () => {
+    // A void element (<img>, <input>, <br>, …) emits no closing tag, so opening
+    // a balance region for it would run to the container's end and delete the
+    // visible text that follows. Each hidden void must be a single-node splice.
+    for (const voidTag of [
+      "<img hidden src=x>",
+      "<input hidden>",
+      "<br hidden>",
+      "<hr hidden>",
+    ]) {
+      assert.equal(
+        applyHtml(`a ${voidTag} keep me`),
+        `a ${HIDDEN_PLACEHOLDER} keep me`,
+        voidTag,
+      );
+    }
+  });
+  it("splices a hidden void element inside a heading, keeping the heading text", () =>
+    assert.match(
+      applyHtml("# title <img hidden src=x> stays"),
+      /title.*stays/,
+    ));
   it("preserves an autolink and an explicit link verbatim next to a strip", () => {
     const out = applyHtml(
       `x <span style="display:none">SECRET</span> see <https://example.com/page> and [click](https://example.com/explicit)`,

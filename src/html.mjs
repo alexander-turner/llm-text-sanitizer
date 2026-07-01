@@ -315,6 +315,27 @@ export const REPORTED_TAGS = new Set([
   "math",
 ]);
 
+// HTML void elements: they never carry content and never emit a closing tag, so
+// a hidden one (<img hidden>, <input hidden>, …) must be spliced as a single node
+// — opening a balance region for it would run to the container's end (no close
+// ever arrives) and delete the visible text that follows.
+const VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
 /**
  * True for an element a rendered page would not show: `hidden` attribute or a
  * hiding inline style. Works on both hast nodes and parseHtmlTag results.
@@ -653,6 +674,17 @@ function scanInlineChildren(node, ranges, warned) {
     collectCommentRanges(value, base, child.position.end.offset, ranges);
     const tagName = isHiddenOpen(value);
     if (tagName) {
+      // A void element never emits a matching close, so a balance region would
+      // extend to the container end and splice out following visible text. Emit
+      // a single-node range instead (the flow/source branch already does this).
+      if (VOID_ELEMENTS.has(tagName)) {
+        ranges.push({
+          start: base,
+          end: child.position.end.offset,
+          kind: "hidden",
+        });
+        continue;
+      }
       state.tag = tagName;
       state.depth = 1;
       state.regionStart = base;
