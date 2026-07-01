@@ -76,8 +76,13 @@ jobs:
           node-version: "22"
           setup-python: "true"
 
-      - name: Python client tests
-        run: uv run --extra dev pytest tests/test_python_client.py
+      # The secrets suite rides this matrix for its daemon: the Unix-socket
+      # server uses fcntl/flock and AF_UNIX bind semantics that diverge on
+      # macOS/BSD, so it must run on every host OS, not just the ubuntu `validate`
+      # job. The rest of the secrets suite is pure Python but runs here too — a
+      # few redundant seconds on ubuntu for one clear command.
+      - name: Python client and secrets-engine tests
+        run: uv run --extra dev pytest tests/test_python_client.py tests/secrets/
 
   # Stable Required check: runs even when `validate`/`python-client` are
   # cancelled/skipped, so a protected branch never gets stuck on a check that
