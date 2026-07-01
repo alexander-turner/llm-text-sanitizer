@@ -19,10 +19,10 @@ import {
   CHECKS,
   CATEGORY,
   CATEGORY_LABELS,
-  STRIP,
   LONG_RUN_RE,
   LONG_RUN_THRESHOLD,
   SCATTERED_THRESHOLD,
+  countPayloadInvisible,
   isSgrOnly,
   SGR_RE,
 } from "./invisible.mjs";
@@ -104,7 +104,12 @@ export function classifyPrompt(prompt, strip = stripAnsiFully) {
   const deAnsi = strip(prompt);
 
   const longRunSample = deAnsi.match(LONG_RUN_RE)?.[0] ?? null;
-  const invisibleCount = deAnsi.match(STRIP)?.length ?? 0;
+  // Count only PAYLOAD invisibles for the scatter gate: ZWNJ/ZWJ (and emoji
+  // VS16) that do real rendering work are excluded, so a legitimately
+  // joiner-dense multilingual prompt (formal Persian, an emoji ZWJ sequence) is
+  // not blocked by sheer joiner count. This mirrors carveStrip's own
+  // payloadInvis < SCATTERED_THRESHOLD gate so the block and strip layers agree.
+  const invisibleCount = countPayloadInvisible(deAnsi);
   const invisiblesBelowThreshold =
     longRunSample === null && invisibleCount < SCATTERED_THRESHOLD;
 

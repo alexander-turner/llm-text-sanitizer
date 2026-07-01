@@ -25,6 +25,7 @@ import {
   SCATTERED_THRESHOLD,
   CONSECUTIVE_JOINER_CAP,
   TOTAL_PRESERVED_JOINER_BUDGET,
+  PRESERVED_JOINER_PER_VISIBLE,
   LINGUISTIC_SCRIPTS,
 } from "../src/invisible.mjs";
 import { applyLayer1 } from "../src/layer1.mjs";
@@ -160,6 +161,36 @@ const SCRIPT_LETTERS = {
   Sinhala: [0x0d9a, 0x0d9c],
 };
 
+// Brahmic viramas. A ZWNJ/ZWJ in an Indic script does real rendering work only
+// immediately AFTER the virama (explicit halant / half-form), so a valid sample
+// must include it. Arabic is cursive (letters join directly) and has no virama,
+// so it is absent here — presence in this map is the "is Brahmic" signal.
+const SCRIPT_VIRAMA = {
+  Devanagari: 0x94d,
+  Bengali: 0x9cd,
+  Gurmukhi: 0xa4d,
+  Gujarati: 0xacd,
+  Oriya: 0xb4d,
+  Tamil: 0xbcd,
+  Telugu: 0xc4d,
+  Kannada: 0xccd,
+  Malayalam: 0xd4d,
+  Sinhala: 0xdca,
+};
+
+// Build a linguistically valid `letter (joiner letter){n}` sample: cursive
+// scripts join letter-to-letter; Brahmic scripts insert the virama before each
+// joiner. Used to drive the per-script preserve cases from the SSOT.
+function joinedChain(script, letters, joiner, n) {
+  const virama = SCRIPT_VIRAMA[script];
+  let s = cp(letters[0]);
+  for (let k = 0; k < n; k++) {
+    if (virama !== undefined) s += cp(virama);
+    s += joiner + cp(letters[(k + 1) % letters.length]);
+  }
+  return s;
+}
+
 describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
   for (const [name, sample, joinerAt] of [
     ["Persian ZWNJ between Arabic letters", PERSIAN, 2],
@@ -190,8 +221,10 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     );
     for (const joiner of [ZWNJ, ZWJ]) {
       const label = joiner === ZWNJ ? "ZWNJ" : "ZWJ";
-      it(`preserves a ${label} between two ${script} letters`, () => {
-        const sample = cp(letters[0]) + joiner + cp(letters[1]);
+      const where =
+        SCRIPT_VIRAMA[script] === undefined ? "letters" : "a virama";
+      it(`preserves a ${label} after ${where} in ${script}`, () => {
+        const sample = joinedChain(script, letters, joiner, 1);
         const { cleaned, found } = stripInvisibleWithReport(sample);
         assert.equal(cleaned, sample);
         assert.deepEqual(found, []);
@@ -287,42 +320,53 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     });
   }
 
-  // The scatter floor (SCATTERED_THRESHOLD = 30) is a boundary on TOTAL
-  // invisibles: 29 keep the carve-out enabled, 30 disable it wholesale. Both
-  // sides are pinned so a `<`→`<=`/`>` mutant can't survive. To probe THIS gate
-  // alone we hold the joiner count under TOTAL_PRESERVED_JOINER_BUDGET (so the
-  // budget gate doesn't trip first) and pad the rest of the floor with a
-  // non-joiner invisible class (interior BOMs) the budget never governs. A
-  // single legit Persian word (1 ZWNJ) survives at 29 total, is stripped at 30.
-  const padCount = SCATTERED_THRESHOLD - 2; // + 1 joiner = SCATTERED_THRESHOLD-1
-  const interiorBom = cp(0xfeff); // Cf, strippable, NOT a joiner
+  // The scatter floor (SCATTERED_THRESHOLD = 30) is a boundary on PAYLOAD
+  // invisibles — the hidden bytes left after the join-type gate exempts joiners
+  // that do real rendering work. 29 payload keep the carve-out enabled, 30
+  // disable it wholesale (even a meaningful joiner is then stripped). Both sides
+  // are pinned so a `<`→`<=`/`>` mutant can't survive. A gate-passing Persian
+  // ZWNJ is NOT payload, so we pad the floor with a non-joiner invisible class
+  // (interior BOMs): the ZWNJ survives at 29 payload, is stripped at 30.
+  const interiorBom = cp(0xfeff); // Cf, strippable, always payload (never a joiner)
 
-  it(`keeps a legit joiner just under the scatter floor (${SCATTERED_THRESHOLD - 1} total)`, () => {
+  it(`keeps a legit joiner just under the payload floor (${SCATTERED_THRESHOLD - 1} payload)`, () => {
     const word = cp(0x645) + ZWNJ + cp(0x62e);
-    // word ends, then a real visible char, then the BOM padding (interior BOMs
-    // are stripped but counted toward the floor): 1 joiner + (floor-2) = floor-1.
-    const input = word + "x" + interiorBom.repeat(padCount);
+    // word (1 gate-passing joiner, exempt) + a real char + (floor-1) BOMs: the
+    // BOMs are the only payload counted, one short of the floor.
+    const input = word + "x" + interiorBom.repeat(SCATTERED_THRESHOLD - 1);
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, word + "x"); // joiner preserved, interior BOMs gone
     assert.deepEqual(found, [CATEGORY.CF]); // the BOM padding is reported
     assert.equal(countOf(cleaned, ZWNJ), 1);
   });
 
-  it("strips the joiner too once the scatter floor is reached", () => {
+  it("strips the joiner too once payload invisibles reach the floor", () => {
     const word = cp(0x645) + ZWNJ + cp(0x62e);
-    // 1 joiner + (floor-1) BOMs = floor total → carve-out off, joiner stripped.
-    const input = word + "x" + interiorBom.repeat(SCATTERED_THRESHOLD - 1);
+    // floor BOMs = floor payload → carve-out off wholesale, the joiner stripped
+    // even though it is meaningful (threshold-evasion catch).
+    const input = word + "x" + interiorBom.repeat(SCATTERED_THRESHOLD);
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, cp(0x645) + cp(0x62e) + "x");
     assert.deepEqual(found, [CATEGORY.CF]);
     assert.equal(countOf(cleaned, ZWNJ), 0);
   });
 
-  it("counts EVERY invisible class toward the floor, not just joiners", () => {
-    // 29 variation selectors + 1 ZWNJ = 30 total invisibles: the floor counts
-    // all STRIP classes, so even an otherwise-legit Arabic ZWNJ is stripped.
+  it("exempts a gate-passing joiner from the floor but counts payload classes", () => {
+    // 29 variation selectors (payload) + a meaningful Arabic ZWNJ (exempt): only
+    // 29 payload, under the floor, so the ZWNJ survives while every VS is
+    // stripped. This is the precision win over counting TOTAL invisibles.
     const input =
       cp(0xfe0f).repeat(SCATTERED_THRESHOLD - 1) + cp(0x645) + ZWNJ + cp(0x62e);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x645) + ZWNJ + cp(0x62e));
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+
+  it("non-joiner payload still trips the floor and then strips the joiner", () => {
+    // 30 variation selectors (payload) reach the floor: carve-out off, so even
+    // the meaningful ZWNJ is stripped and both classes are reported.
+    const input =
+      cp(0xfe0f).repeat(SCATTERED_THRESHOLD) + cp(0x645) + ZWNJ + cp(0x62e);
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, cp(0x645) + cp(0x62e));
     assert.deepEqual(found, [CATEGORY.CF, CATEGORY.VARIATION_SELECTORS]);
@@ -344,6 +388,70 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
       CATEGORY.VARIATION_SELECTORS,
       CATEGORY.BLANK_FILLERS,
     ]);
+  });
+});
+
+// ─── Joining_Type gate: real prose kept, rendering-inert joiners stripped ─────
+// The carve-out preserves a joiner only where it does real cursive-rendering
+// work (decided from Unicode Joining_Type), not merely because both neighbours
+// are letters of a linguistic script. This both KEEPS dense real prose and
+// STRIPS a joiner that changes nothing on screen — the covert-channel case the
+// old "two script letters" check waved through.
+describe("stripInvisible: Joining_Type-driven precision", () => {
+  it("preserves a multi-word Persian sentence with several ZWNJ, un-flagged", () => {
+    // "نمی‌دانم کتاب‌ها را می‌خوانم" — the ZWNJ is spliced in explicitly (not
+    // hidden in the literal) so its position is reviewable. Each sits at a
+    // genuine cursive-join boundary (yeh|dal, beh|heh, yeh|khah): real formal
+    // prose, preserved byte-identical.
+    const sentence =
+      "نمی" +
+      ZWNJ +
+      "دانم" +
+      " " +
+      "کتاب" +
+      ZWNJ +
+      "ها" +
+      " " +
+      "را" +
+      " " +
+      "می" +
+      ZWNJ +
+      "خوانم";
+    const { cleaned, found } = stripInvisibleWithReport(sentence);
+    assert.equal(cleaned, sentence);
+    assert.deepEqual(found, []);
+    assert.equal(countOf(cleaned, ZWNJ), 3);
+  });
+
+  it("preserves a ZWNJ separated from its letters by a transparent harakat", () => {
+    // beh + fatha (U+064E, Transparent) + ZWNJ + heh: the combining mark does not
+    // break the join, so the effective neighbours are still two joining letters.
+    const input = cp(0x628) + cp(0x64e) + ZWNJ + cp(0x647);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+  });
+
+  // Conservative gate: a ZWNJ between two CURSIVE letters is preserved, even
+  // where the pair happens to be rendering-inert (reh is right-joining, so it
+  // arguably never connects forward). Deciding inertness needs the full
+  // directional join algorithm; getting it subtly wrong would strip real content,
+  // so the gate preserves any joiner flanked by cursive letters and leans on the
+  // caps for the covert channel — "prefer the false negative, let it pass."
+  it("preserves a ZWNJ between two cursive Arabic letters (reh · ZWNJ · beh)", () => {
+    const input = cp(0x631) + ZWNJ + cp(0x628); // reh (R) · ZWNJ · beh (D)
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+  });
+
+  // A ZWNJ next to a NON-joining letter still does no work and is stripped: the
+  // gate needs a cursive letter on both sides, and hamza is Joining_Type U.
+  it("strips a ZWNJ adjacent to a non-joining letter (beh · ZWNJ · hamza)", () => {
+    const input = cp(0x628) + ZWNJ + cp(0x621); // beh (D) · ZWNJ · hamza (U)
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x628) + cp(0x621));
+    assert.deepEqual(found, [CATEGORY.CF]);
   });
 });
 
@@ -553,6 +661,21 @@ describe("document-wide preserved-joiner budget", () => {
   it("the budget sits below the scatter floor so it is the operative gate", () => {
     assert.ok(TOTAL_PRESERVED_JOINER_BUDGET < SCATTERED_THRESHOLD);
   });
+
+  it("raises the allowance proportionally in long text (above the floor)", () => {
+    // The budget is not a flat constant: it scales at 1 preserved joiner per
+    // PRESERVED_JOINER_PER_VISIBLE visible chars, never below the floor. Give
+    // each gap-separated joiner MORE than that much visible padding, and more
+    // than TOTAL_PRESERVED_JOINER_BUDGET of them survive — this is what keeps
+    // genuinely long formal Persian/Indic prose from being clipped at 16.
+    const joiners = TOTAL_PRESERVED_JOINER_BUDGET + 4;
+    const pad = " word".repeat(PRESERVED_JOINER_PER_VISIBLE); // ample visible text
+    const input = (AR1 + ZWNJ + AR2 + pad).repeat(joiners);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.ok(joiners > TOTAL_PRESERVED_JOINER_BUDGET);
+    assert.equal(countOf(cleaned, ZWNJ), joiners); // all preserved, none clipped
+    assert.deepEqual(found, []);
+  });
 });
 
 // ─── Precision negatives: real multilingual text is preserved un-flagged ──────
@@ -581,8 +704,8 @@ describe("budget precision: legitimate joiners preserved and un-flagged", () => 
     assert.ok(a !== undefined, `no representative letters for ${script}`);
     it(`a 1-3 joiner ${script} compound is preserved un-flagged`, () => {
       // " word1 word2 " with 1 then 3 joiners — 4 joiners total, under budget.
-      const w1 = cp(a) + ZWNJ + cp(b);
-      const w2 = cp(a) + ZWNJ + cp(b) + ZWNJ + cp(a) + ZWNJ + cp(b);
+      const w1 = joinedChain(script, [a, b], ZWNJ, 1);
+      const w2 = joinedChain(script, [a, b], ZWNJ, 3);
       const input = `${w1} ${w2}`;
       const { cleaned, found } = stripInvisibleWithReport(input);
       assert.equal(cleaned, input);
