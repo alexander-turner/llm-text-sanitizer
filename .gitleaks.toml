@@ -1,0 +1,18 @@
+# gitleaks configuration.
+#
+# Extends the built-in default ruleset (so every default detector stays active)
+# and adds one allowlist: the secret-redaction engine's test fixtures and
+# packaged detector data legitimately contain credential-shaped SAMPLE values —
+# fake AWS keys, a throwaway PEM, provider tokens — because the engine's whole
+# job is to detect and redact them. These are not real secrets; scanning them as
+# if they were would make the redactor untestable. The allowlist is scoped to
+# those fixture paths only, so real secrets committed anywhere else still fail.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Secret-redaction engine sample fixtures (not real secrets)"
+paths = [
+  '''tests/secrets/.*''',
+  '''python/agent_input_sanitizer/secrets/data/secret-detectors\.json''',
+]
