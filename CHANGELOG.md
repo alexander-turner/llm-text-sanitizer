@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.6.1] - 2026-07-01
+
+### Added
+
+- Added parallel-audit skill documentation.
+
 ## [1.6.0] - 2026-06-30
 
 ### Added
