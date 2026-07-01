@@ -231,6 +231,13 @@ const LINGUISTIC_LETTER = new RegExp(
 const EMOJI_LEFT = /[\p{Extended_Pictographic}\p{Emoji_Modifier}]/u;
 // Right side of an emoji joiner is always the next component's base pictograph.
 const EMOJI_BASE = /\p{Extended_Pictographic}/u;
+// A variation selector legitimately sits between a base pictograph and a
+// following ZWJ (🏳️‍🌈 = flag base, VS16, ZWJ, rainbow; 👁️‍🗨️), so the joiner's real
+// left neighbor for the emoji test is the pictograph, not the selector.
+const VARIATION_SELECTOR = new RegExp(`[${VS}]`, "u");
+// U+FE0F forces emoji (vs text) presentation; a single one directly after a
+// pictograph is part of a visible emoji, not a hidden variation-selector run.
+const EMOJI_PRESENTATION_SELECTOR = 0xfe0f;
 
 // Non-global single-char classifiers (CHECKS carry `g`, whose lastIndex is
 // stateful across `.test`). carveStrip uses these to attribute each removed
@@ -286,6 +293,21 @@ function bulkStrip(body) {
 }
 
 /**
+ * The nearest code point left of index `i` that is not a variation selector, or
+ * "" at the string start. An emoji ZWJ sequence can place a VS16 between the base
+ * pictograph and the ZWJ, so the joiner's real left neighbor is found by stepping
+ * over any variation selector(s).
+ * @param {string[]} cps
+ * @param {number} i
+ * @returns {string}
+ */
+function leftNonSelector(cps, i) {
+  let p = i - 1;
+  while (p >= 0 && VARIATION_SELECTOR.test(cps[p])) p--;
+  return cps[p] ?? "";
+}
+
+/**
  * Carve-out strip (a ZWNJ/ZWJ is present): walk code points, preserving a join
  * control only where isPreservedJoiner holds AND the text stays under the
  * scatter floor AND neither the per-cluster (CONSECUTIVE_JOINER_CAP) nor the
@@ -329,11 +351,28 @@ function carveStrip(body) {
       out += ch; // ordinary visible character
       continue;
     }
+    const underBudget =
+      allowCarveOut && preservedTotal < TOTAL_PRESERVED_JOINER_BUDGET;
+    // An emoji presentation selector (U+FE0F) directly after a pictograph or
+    // skin-tone modifier is part of a visible emoji, not a hidden VS run — keep
+    // it so an emoji ZWJ sequence survives intact. A genuine variation-selector
+    // run still surfaces: only the selector adjacent to the pictograph is
+    // preserved; the next one's left neighbor is itself a selector, so it is
+    // stripped and reported. Counts against the document budget like a joiner.
     if (
-      allowCarveOut &&
+      underBudget &&
+      ch.codePointAt(0) === EMOJI_PRESENTATION_SELECTOR &&
+      EMOJI_LEFT.test(cps[i - 1] ?? "")
+    ) {
+      preservedTotal++;
+      prevVisible = false; // the selector keeps the emoji cluster open
+      out += ch;
+      continue;
+    }
+    if (
+      underBudget &&
       joinerRun < CONSECUTIVE_JOINER_CAP &&
-      preservedTotal < TOTAL_PRESERVED_JOINER_BUDGET &&
-      isPreservedJoiner(ch, cps[i - 1] ?? "", cps[i + 1] ?? "")
+      isPreservedJoiner(ch, leftNonSelector(cps, i), cps[i + 1] ?? "")
     ) {
       joinerRun++;
       preservedTotal++;

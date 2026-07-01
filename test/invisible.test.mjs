@@ -214,6 +214,37 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     assert.deepEqual(found, []);
   });
 
+  // Emoji ZWJ sequences carry a VS16 (U+FE0F) presentation selector between the
+  // base pictograph and the ZWJ (and often trailing). The joiner's immediate left
+  // neighbor is then the selector, not the pictograph — the carve-out must look
+  // past the selector, and keep the selector itself, or the whole emoji is split
+  // into separate glyphs and falsely flagged. Regression for that bug.
+  for (const [name, sample] of [
+    ["rainbow flag", cp(0x1f3f3) + cp(0xfe0f) + ZWJ + cp(0x1f308)],
+    [
+      "eye in speech bubble (trailing VS16)",
+      cp(0x1f441) + cp(0xfe0f) + ZWJ + cp(0x1f5e8) + cp(0xfe0f),
+    ],
+    ["heart on fire", cp(0x2764) + cp(0xfe0f) + ZWJ + cp(0x1f525)],
+  ]) {
+    it(`preserves the ${name} emoji ZWJ sequence unchanged`, () => {
+      const { cleaned, found } = stripInvisibleWithReport(sample);
+      assert.equal(cleaned, sample);
+      assert.deepEqual(found, []);
+    });
+  }
+
+  it("keeps one emoji selector but strips a stuffed VS16 run", () => {
+    // A real emoji keeps ONE selector after the pictograph; a run of them is a
+    // hidden channel. Every selector past the first has a selector on its left,
+    // so it is stripped and reported — while the ZWJ join still survives.
+    const input = cp(0x1f3f3) + cp(0xfe0f).repeat(4) + ZWJ + cp(0x1f308);
+    const expected = cp(0x1f3f3) + cp(0xfe0f) + ZWJ + cp(0x1f308);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, expected);
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+
   // Payload contexts: each is still stripped AND reported in `found`.
   for (const [name, input, expected] of [
     ["ZWNJ between Latin", `a${ZWNJ}b`, "ab"],
