@@ -73,6 +73,34 @@ const FUZZ_REQUIRED = [
   "deleteVerbatimSpans",
 ];
 
+// Entry points that owe SEMANTIC-CORRECTNESS fuzzing, not just structural
+// fuzzing: a structural property (never-throws, idempotent, shape-preserved)
+// can hold in aggregate while a detector corrupts the wrong leaf or misses a
+// specific payload shape — exactly the class of false positive that shipped
+// in scanText's scatter floor (fixed alongside this gate). A subset of
+// FUZZ_REQUIRED: named internal helpers (isHiddenStyle, decodeRun,
+// resolveSpan, alignDeletions, rehydrateNewString, stripInvisibleWithReport,
+// deleteVerbatimSpans; urlHost's sibling checkExfilUrl is kept since it's
+// independently callable) are exercised only THROUGH their public entry
+// point in these suites, so requiring their own name to appear here would be
+// a false negative, not a stronger check — the precision property is
+// asserted at the entry point.
+const SEMANTIC_FUZZ_REQUIRED = [
+  "stripInvisible",
+  "sanitizeHtml",
+  "detectExfil",
+  "checkExfilUrl",
+  "urlHost",
+  "normalizeConfusables",
+  "foldConfusables",
+  "scanText",
+  "classifyPrompt",
+  "sanitizeText",
+  "sanitizeValue",
+  "rehydrateRedacted",
+  "occurrences",
+];
+
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf8",
 }).trim();
@@ -101,6 +129,18 @@ const fuzzFiles = readdirSync(testDir)
     return { name, source, code: stripImportsAndComments(source) };
   })
   .filter((file) => file.source.includes("fc.assert("));
+
+// A "semantic-fuzz suite" is a fuzz file following the `*-semantic-fuzz.
+// test.mjs` naming convention this repo uses for precision fuzzing (fast-check
+// generators that interleave known-good and known-bad tokens and assert each
+// one's EXACT fate), as opposed to the structural `*-property.test.mjs`
+// suites. Naming-based rather than content-sniffed: a heuristic for "asserts
+// per-token precision" would be exactly the kind of guard that can't cleanly
+// separate the real thing from a lookalike, and CLAUDE.md's guidance is to
+// let that kind of check fail open rather than fabricate false confidence.
+const semanticFuzzFiles = fuzzFiles.filter((file) =>
+  file.name.endsWith("-semantic-fuzz.test.mjs"),
+);
 
 const exportedFunctions = new Map(
   [
@@ -142,6 +182,43 @@ describe("fuzz-coverage obligation gate", () => {
       assert.ok(
         hits.length > 0,
         `${name} handles untrusted input but no property/fuzz suite references it`,
+      );
+    });
+  }
+});
+
+describe("semantic-fuzz obligation gate", () => {
+  it("discovers at least one *-semantic-fuzz.test.mjs suite (gate is not vacuous)", () => {
+    assert.ok(
+      semanticFuzzFiles.length > 0,
+      "no *-semantic-fuzz.test.mjs suites found — the gate would pass vacuously",
+    );
+    assert.ok(SEMANTIC_FUZZ_REQUIRED.length > 0);
+  });
+
+  it("every SEMANTIC_FUZZ_REQUIRED name is also in FUZZ_REQUIRED", () => {
+    // Semantic-fuzz coverage is a stricter obligation layered on top of the
+    // structural one; a name here that isn't in FUZZ_REQUIRED is a drifted
+    // entry, not a real additional target.
+    for (const name of SEMANTIC_FUZZ_REQUIRED)
+      assert.ok(
+        FUZZ_REQUIRED.includes(name),
+        `${name} is in SEMANTIC_FUZZ_REQUIRED but not FUZZ_REQUIRED`,
+      );
+  });
+
+  for (const name of SEMANTIC_FUZZ_REQUIRED) {
+    it(`'${name}' is referenced by a *-semantic-fuzz.test.mjs suite`, () => {
+      const wordRe = new RegExp(`\\b${name}\\b`);
+      const hits = semanticFuzzFiles.filter((file) => wordRe.test(file.code));
+      assert.ok(
+        hits.length > 0,
+        `${name} is a precision-sensitive entry point (structural fuzzing alone ` +
+          `can't catch it corrupting the wrong leaf or missing a payload shape) ` +
+          `but no *-semantic-fuzz.test.mjs suite references it — add one ` +
+          `(see test/invisible-semantic-fuzz.test.mjs for the pattern) or, if the ` +
+          `precision property is truly only assertable through a different named ` +
+          `entry point, move this name's coverage there and document why here`,
       );
     });
   }
