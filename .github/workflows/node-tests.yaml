@@ -32,6 +32,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # `pnpm test` gates on 100% branch coverage. Without a fixed seed, fast-check
+    # draws different inputs each run, so a branch that's only reachable from a
+    # specific random draw (not from any deterministic example test) can go
+    # uncovered on an unlucky run and fail the coverage gate on unrelated code.
+    # FC_REPRODUCIBLE pins the seed (see test/test-helpers.mjs), mirroring
+    # mutation.yaml's use of the same var for its own stable-oracle requirement.
+    env:
+      FC_REPRODUCIBLE: "1"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:

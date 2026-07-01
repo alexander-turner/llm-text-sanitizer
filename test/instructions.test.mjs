@@ -282,6 +282,23 @@ describe("scanText", () => {
     assert.match(findings[0].method, /scattered/);
     assert.equal(findings[0].charCount, SCATTERED_THRESHOLD);
   });
+
+  it("STILL counts a leading joiner whose selector-skip runs off the start of the document (not an emoji joiner)", () => {
+    // Mirror of the dangling-ZWJ guard above, but for leftNonSelector's OWN
+    // fallback: a ZWJ preceded only by variation selector(s) that run off the
+    // very start of the document (no real code point at all before them) must
+    // not be mistaken for joining onto a preceding emoji — leftNonSelector's
+    // selector-skip loop exhausts to p < 0, and its `cps[p] ?? ""` fallback
+    // must report no left neighbor, not the discount-eligible one.
+    const leadingSelectorJoiner = `${cp(0xfe0f)}${cp(0x200d)}${cp(0x1f525)}`; // selector + ZWJ + fire, nothing before
+    const chunks = Array.from({ length: SCATTERED_THRESHOLD - 2 }, (_, i) =>
+      i % 3 === 0 ? `x${cp(0x200b)}` : cp(0x200b),
+    ).join("");
+    const findings = scanText(leadingSelectorJoiner + chunks);
+    assert.equal(findings.length, 1);
+    assert.match(findings[0].method, /scattered/);
+    assert.equal(findings[0].charCount, SCATTERED_THRESHOLD);
+  });
 });
 
 // ─── file helpers ────────────────────────────────────────────────────────────
